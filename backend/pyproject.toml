@@ -1,0 +1,10 @@
+[project]
+name = "docubrain-backend"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "docubrain[backend,dev,ee]",
+]
+
+[tool.uv.sources]
+docubrain = { workspace = true }

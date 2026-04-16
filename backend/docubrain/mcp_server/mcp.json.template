@@ -1,0 +1,10 @@
+{
+    "mcpServers": {
+      "DocuBrain": {
+        "url": "https://cloud.docubrain.app/mcp",
+        "headers": {
+          "Authorization": "Bearer [YOUR PAT OR API KEY HERE]"
+        }
+      }
+    }
+  }

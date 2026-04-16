@@ -1,0 +1,55 @@
+import pytest
+
+import docubrain.auth.users as users
+from docubrain.auth.users import verify_email_is_invited
+from docubrain.configs.constants import AuthType
+from docubrain.error_handling.exceptions import DocubrainError
+
+
+@pytest.mark.parametrize("auth_type", [AuthType.SAML, AuthType.OIDC])
+def test_verify_email_is_invited_skips_whitelist_for_sso(
+    monkeypatch: pytest.MonkeyPatch, auth_type: AuthType
+) -> None:
+    monkeypatch.setattr(users, "AUTH_TYPE", auth_type, raising=False)
+    monkeypatch.setattr(users, "workspace_invite_only_enabled", lambda: True)
+    monkeypatch.setattr(
+        users,
+        "get_invited_users",
+        lambda: ["allowed@example.com"],
+        raising=False,
+    )
+
+    # Should not raise even though whitelist is populated
+    verify_email_is_invited("newuser@example.com")
+
+
+def test_verify_email_is_invited_enforced_for_basic_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(users, "AUTH_TYPE", AuthType.BASIC, raising=False)
+    monkeypatch.setattr(users, "workspace_invite_only_enabled", lambda: True)
+    monkeypatch.setattr(
+        users,
+        "get_invited_users",
+        lambda: ["allowed@example.com"],
+        raising=False,
+    )
+
+    with pytest.raises(DocubrainError) as exc:
+        verify_email_is_invited("newuser@example.com")
+    assert exc.value.status_code == 403
+
+
+def test_verify_email_is_invited_skipped_when_invite_only_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(users, "AUTH_TYPE", AuthType.BASIC, raising=False)
+    monkeypatch.setattr(users, "workspace_invite_only_enabled", lambda: False)
+    monkeypatch.setattr(
+        users,
+        "get_invited_users",
+        lambda: ["allowed@example.com"],
+        raising=False,
+    )
+
+    verify_email_is_invited("newuser@example.com")
