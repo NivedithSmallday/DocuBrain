@@ -1,7 +1,7 @@
 export const FEATURES = {
   AGENTS: false,
-  INTEGRATIONS: false,
-  ORG_MANAGEMENT: false,
+  INTEGRATIONS: true,
+  ORG_MANAGEMENT: true,
   USAGE_ANALYTICS: false,
   BILLING: false,
 } as const;

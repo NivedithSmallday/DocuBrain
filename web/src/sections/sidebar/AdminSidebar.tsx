@@ -99,11 +99,14 @@ function buildItems(
   }
 
   // 3. Documents & Knowledge
+  // Show connectors if INTEGRATIONS feature is enabled (regardless of vector DB status)
+  if (FEATURES.INTEGRATIONS) {
+    add(SECTIONS.DOCUMENTS_AND_KNOWLEDGE, ADMIN_ROUTES.INDEXING_STATUS);
+    add(SECTIONS.DOCUMENTS_AND_KNOWLEDGE, ADMIN_ROUTES.ADD_CONNECTOR);
+  }
+
+  // Show document sets and other features only if vector DB is enabled
   if (vectorDbEnabled) {
-    if (FEATURES.INTEGRATIONS) {
-      add(SECTIONS.DOCUMENTS_AND_KNOWLEDGE, ADMIN_ROUTES.INDEXING_STATUS);
-      add(SECTIONS.DOCUMENTS_AND_KNOWLEDGE, ADMIN_ROUTES.ADD_CONNECTOR);
-    }
     add(SECTIONS.DOCUMENTS_AND_KNOWLEDGE, ADMIN_ROUTES.DOCUMENT_SETS);
     if (!isCurator && !enableCloud) {
       items.push({

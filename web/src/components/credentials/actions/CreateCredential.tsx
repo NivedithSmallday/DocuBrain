@@ -36,7 +36,7 @@ const CreateButton = ({
   groups: number[];
 }) => (
   <OpalButton
-    disabled={isSubmitting || (!isAdmin && groups.length === 0)}
+    disabled={isSubmitting}
     onClick={onClick}
     icon={SvgPlusCircle}
   >
@@ -231,7 +231,7 @@ export default function CreateCredential({
                             setShowAdvancedOptions={setShowAdvancedOptions}
                           />
                         )}
-                        {(showAdvancedOptions || !isAdmin) && (
+                        {((showAdvancedOptions && isAdmin) || !isAdmin) && (
                           <IsPublicGroupSelector
                             formikProps={formikProps}
                             objectName="credential"

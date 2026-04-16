@@ -164,26 +164,26 @@ const GDriveMain = () => {
         )}
       />
 
-      {isAdmin &&
-        (appCredentialData?.client_id ||
-          serviceAccountKeyData?.service_account_email) && (
-          <>
-            <Title className="mb-2 mt-6">Step 2: Authenticate with DocuBrain</Title>
-            <DriveAuthSection
-              refreshCredentials={handleRefresh}
-              googleDrivePublicUploadedCredential={
-                googleDrivePublicUploadedCredential
-              }
-              googleDriveServiceAccountCredential={
-                googleDriveServiceAccountCredential
-              }
-              appCredentialData={appCredentialData}
-              serviceAccountKeyData={serviceAccountKeyData}
-              connectorAssociated={connectorAssociated}
-              user={user}
-            />
-          </>
-        )}
+      {(appCredentialData?.client_id ||
+        serviceAccountKeyData?.service_account_email) && (
+        <>
+          <Title className="mb-2 mt-6">Step 2: Authenticate with DocuBrain</Title>
+          <DriveAuthSection
+            refreshCredentials={handleRefresh}
+            googleDrivePublicUploadedCredential={
+              googleDrivePublicUploadedCredential
+            }
+            googleDriveServiceAccountCredential={
+              googleDriveServiceAccountCredential
+            }
+            appCredentialData={appCredentialData}
+            serviceAccountKeyData={serviceAccountKeyData}
+            connectorAssociated={connectorAssociated}
+            user={user}
+            isAdmin={isAdmin}
+          />
+        </>
+      )}
     </>
   );
 };

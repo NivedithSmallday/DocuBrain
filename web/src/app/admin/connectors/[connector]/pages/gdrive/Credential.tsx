@@ -249,20 +249,6 @@ export const DriveJsonUploadSection = ({
     }
   };
 
-  if (!isAdmin) {
-    return (
-      <div>
-        <div className="flex items-start py-3 px-4 bg-yellow-50/30 dark:bg-yellow-900/5 rounded">
-          <FiAlertTriangle className="text-yellow-500 h-5 w-5 mr-2 mt-0.5 flex-shrink-0" />
-          <p className="text-sm">
-            Curators are unable to set up the Google Drive credentials. To add a
-            Google Drive connector, please contact an administrator.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div>
       <p className="text-sm mb-3">
@@ -310,7 +296,7 @@ export const DriveJsonUploadSection = ({
               </div>
             </label>
           </div>
-          {isAdmin && !existingAuthCredential && (
+          {!existingAuthCredential && (
             <div className="mt-2">
               <Button
                 variant="danger"
@@ -387,6 +373,7 @@ interface DriveCredentialSectionProps {
   refreshCredentials: () => void;
   connectorAssociated: boolean;
   user: User | null;
+  isAdmin: boolean;
 }
 
 async function handleRevokeAccess(
@@ -418,6 +405,7 @@ export const DriveAuthSection = ({
   refreshCredentials,
   connectorAssociated,
   user,
+  isAdmin,
 }: DriveCredentialSectionProps) => {
   const router = useRouter();
   const [isAuthenticating, setIsAuthenticating] = useState(false);
@@ -590,7 +578,7 @@ export const DriveAuthSection = ({
             setIsAuthenticating(true);
             try {
               const [authUrl, errorMsg] = await setupGoogleDriveOAuth({
-                isAdmin: true,
+                isAdmin,
                 name: "OAuth (uploaded)",
               });
 
