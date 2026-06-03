@@ -52,5 +52,20 @@ while true; do
   fi
 done
 
+if [ "${MCP_SERVER_ENABLED}" = "True" ] || [ "${MCP_SERVER_ENABLED}" = "true" ]; then
+  echo "Waiting for MCP server to boot up..."
+  while true; do
+    status_code=$(curl -o /dev/null -s -w "%{http_code}\n" "http://${DOCUBRAIN_MCP_SERVER_HOST}:8090/health")
+
+    if [ "$status_code" -eq 200 ]; then
+      echo "MCP server responded with 200."
+      break
+    else
+      echo "MCP server responded with $status_code, retrying in 5 seconds..."
+      sleep 5
+    fi
+  done
+fi
+
 # Start nginx and reload every 6 hours
 while :; do sleep 6h & wait; nginx -s reload; done & nginx -g "daemon off;"
