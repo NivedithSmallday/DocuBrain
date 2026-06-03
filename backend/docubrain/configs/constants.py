@@ -557,6 +557,9 @@ class DocubrainCeleryTask:
     CHECK_FOR_EXTERNAL_GROUP_SYNC = "check_for_external_group_sync"
     CHECK_FOR_AUTO_LLM_UPDATE = "check_for_auto_llm_update"
 
+    # MCP Drive indexing
+    CHECK_FOR_MCP_DRIVE_INDEXING = "check_for_mcp_drive_indexing"
+
     # User file processing
     CHECK_FOR_USER_FILE_PROCESSING = "check_for_user_file_processing"
     PROCESS_SINGLE_USER_FILE = "process_single_user_file"

@@ -108,6 +108,10 @@ def _get_connector_runner(
             connector_specific_config=attempt.connector_credential_pair.connector.connector_specific_config,
             credential=attempt.connector_credential_pair.credential,
         )
+        if hasattr(runnable_connector, "set_incremental_sync_context"):
+            runnable_connector.set_incremental_sync_context(
+                attempt.connector_credential_pair.id
+            )
 
         # validate the connector settings
         if not INTEGRATION_TESTS_MODE:

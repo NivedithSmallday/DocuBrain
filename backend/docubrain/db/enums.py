@@ -124,6 +124,19 @@ class SyncStatus(str, PyEnum):
         return self in terminal_states
 
 
+class GoogleDriveSyncScopeType(str, PyEnum):
+    """Drive changes feed scope.
+
+    USER covers My Drive plus files shared with the OAuth/service account user.
+    SHARED_DRIVE is used when we track a dedicated change feed for one shared
+    drive. Keeping this enum generic lets future connectors add similar
+    provider-native incremental cursors without changing retrieval semantics.
+    """
+
+    USER = "USER"
+    SHARED_DRIVE = "SHARED_DRIVE"
+
+
 class MCPAuthenticationType(str, PyEnum):
     NONE = "NONE"
     API_TOKEN = "API_TOKEN"

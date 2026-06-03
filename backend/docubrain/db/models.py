@@ -74,6 +74,7 @@ from docubrain.db.enums import (
     SandboxStatus,
     SyncType,
     SyncStatus,
+    GoogleDriveSyncScopeType,
     MCPAuthenticationType,
     UserFileStatus,
     MCPAuthenticationPerformer,
@@ -4730,6 +4731,194 @@ class MCPConnectionConfig(Base):
     )
 
 
+class GoogleDriveSyncState(Base):
+    """Persistent Drive changes cursor for a connector credential pair.
+
+    This is deliberately separate from IndexAttempt.checkpoint_pointer. Normal
+    checkpoints are attempt-scoped and are reset after successful attempts; Drive
+    `startPageToken` is a provider cursor that must survive across attempts,
+    worker restarts, reconnects, and retry replay.
+    """
+
+    __tablename__ = "google_drive_sync_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    connector_credential_pair_id: Mapped[int] = mapped_column(
+        ForeignKey("connector_credential_pair.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    scope_type: Mapped[GoogleDriveSyncScopeType] = mapped_column(
+        Enum(GoogleDriveSyncScopeType, native_enum=False),
+        nullable=False,
+        default=GoogleDriveSyncScopeType.USER,
+        server_default=GoogleDriveSyncScopeType.USER.value,
+    )
+    drive_id: Mapped[str] = mapped_column(String, nullable=False, default="", server_default="")
+    page_token: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_sync_time: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_successful_sync_time: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    full_sync_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    token_invalid: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    connector_credential_pair: Mapped[ConnectorCredentialPair] = relationship(
+        "ConnectorCredentialPair"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "connector_credential_pair_id",
+            "scope_type",
+            "drive_id",
+            name="uq_google_drive_sync_state_scope",
+        ),
+        Index(
+            "ix_google_drive_sync_state_cc_pair",
+            "connector_credential_pair_id",
+        ),
+    )
+
+
+class GoogleDriveIndexedFileState(Base):
+    """Last indexed source state for one Drive file.
+
+    The content and ACL fingerprints allow the connector to distinguish
+    permission-only changes from content changes. Permission-only changes should
+    update Document ACL metadata and Vespa ACL fields, but should not re-export,
+    rechunk, or re-embed content that has not changed.
+    """
+
+    __tablename__ = "google_drive_indexed_file_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    connector_credential_pair_id: Mapped[int] = mapped_column(
+        ForeignKey("connector_credential_pair.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    file_id: Mapped[str] = mapped_column(String, nullable=False)
+    drive_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    document_id: Mapped[str | None] = mapped_column(
+        ForeignKey("document.id", ondelete="SET NULL"), nullable=True
+    )
+    content_fingerprint: Mapped[str | None] = mapped_column(String, nullable=True)
+    acl_fingerprint: Mapped[str | None] = mapped_column(String, nullable=True)
+    name: Mapped[str | None] = mapped_column(String, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    parents: Mapped[list[str] | None] = mapped_column(postgresql.JSONB(), nullable=True)
+    modified_time: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_seen_change_time: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_indexed_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    deleted_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    raw_metadata: Mapped[dict[str, Any] | None] = mapped_column(
+        postgresql.JSONB(), nullable=True
+    )
+
+    connector_credential_pair: Mapped[ConnectorCredentialPair] = relationship(
+        "ConnectorCredentialPair"
+    )
+    document: Mapped["Document | None"] = relationship("Document")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "connector_credential_pair_id",
+            "file_id",
+            name="uq_google_drive_indexed_file_state_file",
+        ),
+        Index(
+            "ix_google_drive_indexed_file_state_cc_pair",
+            "connector_credential_pair_id",
+        ),
+        Index(
+            "ix_google_drive_indexed_file_state_document",
+            "document_id",
+        ),
+    )
+
+
+class GoogleDriveSyncJob(Base):
+    """Observable job row for Drive incremental sync attempts."""
+
+    __tablename__ = "google_drive_sync_job"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    connector_credential_pair_id: Mapped[int] = mapped_column(
+        ForeignKey("connector_credential_pair.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sync_state_id: Mapped[int | None] = mapped_column(
+        ForeignKey("google_drive_sync_state.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    status: Mapped[SyncStatus] = mapped_column(
+        Enum(SyncStatus, native_enum=False),
+        nullable=False,
+        default=SyncStatus.IN_PROGRESS,
+        server_default=SyncStatus.IN_PROGRESS.value,
+    )
+    page_token_started: Mapped[str | None] = mapped_column(String, nullable=True)
+    page_token_finished: Mapped[str | None] = mapped_column(String, nullable=True)
+    changed_files_seen: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    files_queued: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    files_deleted: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    permission_updates: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    time_created: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    time_started: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    time_finished: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    connector_credential_pair: Mapped[ConnectorCredentialPair] = relationship(
+        "ConnectorCredentialPair"
+    )
+    sync_state: Mapped[GoogleDriveSyncState | None] = relationship(
+        "GoogleDriveSyncState"
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_google_drive_sync_job_cc_pair_time",
+            "connector_credential_pair_id",
+            "time_created",
+        ),
+        Index("ix_google_drive_sync_job_status", "status"),
+    )
+
+
 """
 Permission Sync Tables
 """
@@ -5349,3 +5538,78 @@ class HookExecutionLog(Base):
     )
 
     hook: Mapped["Hook"] = relationship("Hook", back_populates="execution_logs")
+
+
+class MCPDriveSyncState(Base):
+    """Tracks the state of MCP-based Drive indexing per user per tenant."""
+
+    __tablename__ = "mcp_drive_sync_state"
+    __table_args__ = (
+        UniqueConstraint("user_id", "tenant_id", name="uq_mcp_drive_sync_user_tenant"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    last_sync_started_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_sync_completed_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_successful_sync_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_change_token: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )  # Reserved for future Changes API
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    total_docs_indexed: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    docs_skipped: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, default="idle", server_default="idle"
+    )
+
+
+class MCPDriveDocTracking(Base):
+    """Per-document tracking for MCP Drive indexing.
+
+    Separate from the global document table to avoid leaking
+    connector-specific state into the core data model.
+    """
+
+    __tablename__ = "mcp_drive_doc_tracking"
+    __table_args__ = (
+        UniqueConstraint(
+            "drive_file_id", "user_id", "tenant_id",
+            name="uq_mcp_drive_doc_file_user_tenant",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    document_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    user_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("user.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    drive_file_id: Mapped[str] = mapped_column(String, nullable=False)
+    last_seen_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    content_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_stale: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    consecutive_misses: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
