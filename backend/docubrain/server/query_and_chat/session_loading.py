@@ -99,9 +99,34 @@ def _sanitize_assistant_message_text(
 
     tool_definitions: list[dict] = []
     for tool_call in chat_message.tool_calls:
-        tool = get_tool_by_id(tool_call.tool_id, db_session)
-        if tool.in_code_tool_id:
-            tool_definitions.append(tool.tool_definition())
+        try:
+            tool = get_tool_by_id(tool_call.tool_id, db_session)
+        except ValueError:
+            continue
+
+        # Build a tool definition dict from whichever schema source is
+        # available on the DB model.  The DB ``Tool`` model is NOT the
+        # runtime tool implementation, so we cannot call instance methods
+        # like ``tool_definition()`` on it.
+        schema: dict | None = None
+        if tool.mcp_input_schema:
+            schema = tool.mcp_input_schema
+        elif tool.openapi_schema:
+            schema = tool.openapi_schema.get("function", {}).get(
+                "parameters", {}
+            )
+
+        if schema is not None:
+            tool_definitions.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "parameters": schema,
+                    },
+                }
+            )
 
     sanitized = strip_tool_call_payload_text(chat_message.message, tool_definitions)
     return sanitized if sanitized and sanitized.strip() else None

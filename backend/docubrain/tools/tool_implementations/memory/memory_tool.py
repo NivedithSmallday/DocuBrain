@@ -25,6 +25,10 @@ from docubrain.tools.models import ChatMinimalTextMessage
 from docubrain.tools.models import ToolCallException
 from docubrain.tools.models import ToolResponse
 from docubrain.tools.tool_implementations.memory.models import MemoryToolResponse
+from docubrain.tools.tool_implementations.memory.privacy import (
+    contains_sensitive_memory_data,
+)
+from docubrain.tools.tool_implementations.memory.privacy import SENSITIVE_MEMORY_REFUSAL
 from docubrain.utils.logger import setup_logger
 
 
@@ -122,6 +126,12 @@ class MemoryTool(Tool[MemoryToolOverrideKwargs]):
                 ),
             )
         memory = cast(str, llm_kwargs[MEMORY_FIELD])
+        if contains_sensitive_memory_data(memory):
+            logger.info("Sensitive memory rejected by privacy guard")
+            return ToolResponse(
+                rich_response=None,
+                llm_facing_response=SENSITIVE_MEMORY_REFUSAL,
+            )
 
         existing_memories = override_kwargs.existing_memories
         chat_history = override_kwargs.chat_history
