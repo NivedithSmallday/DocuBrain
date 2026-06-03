@@ -30,9 +30,9 @@ mcp_server = FastMCP(
     auth=DocubrainTokenVerifier(),
 )
 
-# Import tools and resources AFTER mcp_server is created to avoid circular imports
-# Components register themselves via decorators on the shared mcp_server instance
-from docubrain.mcp_server.tools import search  # noqa: E402, F401
+# Import tools and resources AFTER mcp_server is created to avoid circular imports.
+# Components register themselves via decorators on the shared mcp_server instance.
+from docubrain.mcp_server import tools  # noqa: E402, F401
 from docubrain.mcp_server.resources import indexed_sources  # noqa: E402, F401
 
 logger.info("MCP server instance created")
@@ -88,6 +88,43 @@ def create_mcp_fastapi_app() -> FastAPI:
         if request.url.path.rstrip("/") == "/health":
             return JSONResponse({"status": "healthy", "service": "mcp_server"})
         return await call_next(request)
+
+    @app.get("/tools")
+    async def list_tools() -> JSONResponse:
+        """Public diagnostic endpoint listing registered MCP tools."""
+        registered_tools = await mcp_server.list_tools()
+        tools_payload = []
+        for tool in registered_tools:
+            tools_payload.append(
+                {
+                    "name": tool.name,
+                    "description": getattr(tool, "description", None),
+                    "parameters": getattr(tool, "parameters", None),
+                }
+            )
+        return JSONResponse({"tools": tools_payload})
+
+    @app.post("/tools/{tool_name}")
+    async def rest_tool_invocation_guidance(tool_name: str) -> JSONResponse:
+        """Explain why direct REST tool invocation is not supported."""
+        registered_tools = await mcp_server.list_tools()
+        tool_names = {tool.name for tool in registered_tools}
+        if tool_name not in tool_names:
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"MCP tool '{tool_name}' is not registered."},
+            )
+
+        return JSONResponse(
+            status_code=405,
+            content={
+                "detail": (
+                    "MCP tools are registered, but direct REST invocation is not "
+                    "supported on this diagnostic endpoint. Use the MCP "
+                    "streamable HTTP transport with bearer authentication."
+                )
+            },
+        )
 
     # Authentication is handled by FastMCP's DocubrainTokenVerifier (see auth.py)
 
