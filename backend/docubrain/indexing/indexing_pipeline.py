@@ -283,9 +283,14 @@ def get_doc_ids_to_update(
     id_update_time_map = {
         doc.id: doc.doc_updated_at for doc in db_docs if doc.doc_updated_at
     }
+    id_to_db_doc = {doc.id: doc for doc in db_docs}
 
     updatable_docs: list[Document] = []
     for doc in documents:
+        if _document_external_access_changed(doc, id_to_db_doc.get(doc.id)):
+            updatable_docs.append(doc)
+            continue
+
         if (
             doc.id in id_update_time_map
             and doc.doc_updated_at
@@ -295,6 +300,28 @@ def get_doc_ids_to_update(
         updatable_docs.append(doc)
 
     return updatable_docs
+
+
+def _document_external_access_changed(
+    document: Document, db_document: DBDocument | None
+) -> bool:
+    """Return whether source ACLs changed even when content did not.
+
+    Incremental Drive sync can receive permission-only changes with an unchanged
+    content timestamp. Those must still pass through DB/Vespa metadata updates so
+    revoked Drive access stops matching at query time before retrieval/reranking.
+    """
+
+    if document.external_access is None or db_document is None:
+        return False
+
+    return (
+        set(db_document.external_user_emails or [])
+        != document.external_access.external_user_emails
+        or set(db_document.external_user_group_ids or [])
+        != document.external_access.external_user_group_ids
+        or bool(db_document.is_public) != document.external_access.is_public
+    )
 
 
 def index_doc_batch_with_handler(

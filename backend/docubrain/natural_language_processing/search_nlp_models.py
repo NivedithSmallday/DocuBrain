@@ -31,6 +31,7 @@ from docubrain.configs.model_configs import BATCH_SIZE_ENCODE_CHUNKS
 from docubrain.configs.model_configs import (
     BATCH_SIZE_ENCODE_CHUNKS_FOR_API_EMBEDDING_SERVICES,
 )
+from docubrain.configs.model_configs import resolve_embedding_prefixes
 from docubrain.connectors.models import ConnectorStopSignal
 from docubrain.db.models import SearchSettings
 from docubrain.indexing.indexing_heartbeat import IndexingHeartbeatInterface
@@ -1010,13 +1011,21 @@ class EmbeddingModel:
         server_port: int,
         retrim_content: bool = False,
     ) -> "EmbeddingModel":
+        # Audit fix #8: ensure nomic-style local models always carry the required
+        # search_query/search_document task prefixes even if the DB row omitted them.
+        resolved_query_prefix, resolved_passage_prefix = resolve_embedding_prefixes(
+            model_name=search_settings.model_name,
+            provider_type=search_settings.provider_type,
+            query_prefix=search_settings.query_prefix,
+            passage_prefix=search_settings.passage_prefix,
+        )
         return cls(
             server_host=server_host,
             server_port=server_port,
             model_name=search_settings.model_name,
             normalize=search_settings.normalize,
-            query_prefix=search_settings.query_prefix,
-            passage_prefix=search_settings.passage_prefix,
+            query_prefix=resolved_query_prefix,
+            passage_prefix=resolved_passage_prefix,
             api_key=search_settings.api_key,
             provider_type=search_settings.provider_type,
             api_url=search_settings.api_url,

@@ -42,7 +42,10 @@ from typing import cast
 from sqlalchemy.orm import Session
 
 from docubrain.chat.emitter import Emitter
+from docubrain.configs.chat_configs import ENABLE_RERANKER
+from docubrain.configs.chat_configs import ENABLE_RETRIEVAL_TRACING
 from docubrain.configs.chat_configs import MAX_CHUNKS_FED_TO_CHAT
+from docubrain.configs.chat_configs import RERANK_TOP_N
 from docubrain.configs.constants import FederatedConnectorSource
 from docubrain.context.search.federated.slack_search import slack_retrieval
 from docubrain.context.search.models import BaseFilters
@@ -55,6 +58,10 @@ from docubrain.context.search.models import PersonaSearchInfo
 from docubrain.context.search.models import SearchDocsResponse
 from docubrain.context.search.pipeline import merge_individual_chunks
 from docubrain.context.search.pipeline import search_pipeline
+from docubrain.context.search.reranking import rerank_inference_chunks
+from docubrain.context.search.retrieval_trace import chunks_to_traced
+from docubrain.context.search.retrieval_trace import record_retrieval_trace
+from docubrain.context.search.retrieval_trace import RetrievalTrace
 from docubrain.context.search.preprocessing.access_filters import (
     build_access_filters_for_user,
 )
@@ -798,6 +805,42 @@ class SearchTool(Tool[SearchToolOverrideKwargs]):
             weights=search_weights,
             id_extractor=lambda chunk: f"{chunk.document_id}_{chunk.chunk_id}",
         )
+
+        # Audit fix #3: cross-encoder reranking stage. Reorders the fused Top-N
+        # by true query-passage relevance and keeps the strongest RERANK_TOP_N
+        # before the (expensive) LLM-selection step. No-op when ENABLE_RERANKER
+        # is false or if the reranker is unavailable (graceful fallback).
+        rerank_query = (
+            override_kwargs.original_query
+            or semantic_query
+            or (llm_queries[0] if llm_queries else "")
+        )
+        retrieved_before_rerank = list(top_chunks)
+        if ENABLE_RERANKER and rerank_query and top_chunks:
+            top_chunks = rerank_inference_chunks(
+                query=rerank_query,
+                chunks=top_chunks,
+                top_n=max(RERANK_TOP_N, MAX_CHUNKS_FOR_RELEVANCE),
+            )
+
+        # Audit fix #9: persist a retrieval trace for offline debugging/eval.
+        if ENABLE_RETRIEVAL_TRACING:
+            try:
+                record_retrieval_trace(
+                    RetrievalTrace(
+                        query=rerank_query,
+                        search_invoked=True,
+                        generated_queries=list(llm_queries or []),
+                        retrieved_chunks=chunks_to_traced(retrieved_before_rerank),
+                        reranked_chunks=(
+                            chunks_to_traced(top_chunks) if ENABLE_RERANKER else []
+                        ),
+                        chunks_sent_to_llm=chunks_to_traced(top_chunks),
+                        reranker_enabled=ENABLE_RERANKER,
+                    )
+                )
+            except Exception:
+                logger.warning("retrieval trace recording failed", exc_info=True)
 
         # We can disregard all of the chunks that exceed the num_hits parameter since it's not valid to have
         # documents/contents from things that aren't returned to the user on the frontend

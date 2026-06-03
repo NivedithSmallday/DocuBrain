@@ -6,7 +6,8 @@
 LLM_SEMANTIC_QUERY_WEIGHT = 1.3
 # The keyword expansions provide more breadth through a different search ranking function
 # This one is likely to produce the most different results.
-LLM_KEYWORD_QUERY_WEIGHT = 1.0
+# Boosted from 1.0 to improve retrieval of entity-heavy structured data (names, dates, IDs).
+LLM_KEYWORD_QUERY_WEIGHT = 1.2
 # This is also lower because it is the LLM generated query without the custom instructions specifically for this purpose.
 LLM_NON_CUSTOM_QUERY_WEIGHT = 0.7
 # This is much lower weight because it is likely pretty similar to the LLM semantic query but just worse quality.

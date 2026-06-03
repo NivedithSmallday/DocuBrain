@@ -3,6 +3,7 @@ from abc import ABC
 from abc import abstractmethod
 from collections import defaultdict
 
+from docubrain.configs.model_configs import resolve_embedding_prefixes
 from docubrain.connectors.models import ConnectorFailure
 from docubrain.connectors.models import ConnectorStopSignal
 from docubrain.connectors.models import DocumentFailure
@@ -230,11 +231,20 @@ class DefaultIndexingEmbedder(IndexingEmbedder):
         search_settings: SearchSettings,
         callback: IndexingHeartbeatInterface | None = None,
     ) -> "DefaultIndexingEmbedder":
+        # Audit fix #8: passages for nomic-style local models must be embedded with
+        # the "search_document:" prefix. Auto-resolve if the DB row omitted it so
+        # indexing and querying stay symmetric.
+        resolved_query_prefix, resolved_passage_prefix = resolve_embedding_prefixes(
+            model_name=search_settings.model_name,
+            provider_type=search_settings.provider_type,
+            query_prefix=search_settings.query_prefix,
+            passage_prefix=search_settings.passage_prefix,
+        )
         return cls(
             model_name=search_settings.model_name,
             normalize=search_settings.normalize,
-            query_prefix=search_settings.query_prefix,
-            passage_prefix=search_settings.passage_prefix,
+            query_prefix=resolved_query_prefix,
+            passage_prefix=resolved_passage_prefix,
             provider_type=search_settings.provider_type,
             api_key=search_settings.api_key,
             api_url=search_settings.api_url,

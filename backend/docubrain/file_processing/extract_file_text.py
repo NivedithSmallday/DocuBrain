@@ -213,6 +213,77 @@ def pdf_to_text(file: IO[Any], pdf_pass: str | None = None) -> str:
     return text
 
 
+def ocr_pdf_to_text(pdf_bytes: bytes, file_name: str = "") -> str:
+    """OCR a scanned / image-only PDF (audit fix #5).
+
+    Order of preference:
+      1. Unstructured (hi-res OCR) when an Unstructured API key is configured.
+      2. Local Tesseract via ``pdf2image`` + ``pytesseract``.
+
+    Returns extracted text, or "" if OCR is unavailable/fails. Never raises.
+    Logs ``OCR_USED=true`` on success so indexing of scanned PDFs is observable.
+    """
+    if not pdf_bytes:
+        return ""
+
+    from docubrain.configs.app_configs import PDF_OCR_DPI
+    from docubrain.configs.app_configs import PDF_OCR_MAX_PAGES
+
+    # 1. Unstructured (hosted hi-res OCR) — only if an API key is configured.
+    #    Wrapped defensively: resolving the key touches the KV store / DB and must
+    #    never crash indexing if those are unavailable.
+    try:
+        unstructured_enabled = bool(get_unstructured_api_key())
+    except Exception as e:
+        logger.warning(f"Could not resolve Unstructured API key: {e}")
+        unstructured_enabled = False
+    if unstructured_enabled:
+        try:
+            text = unstructured_to_text(BytesIO(pdf_bytes), file_name)
+            if text and text.strip():
+                logger.info(f"OCR_USED=true engine=unstructured file={file_name!r}")
+                return text
+        except Exception as e:
+            logger.warning(
+                f"Unstructured OCR failed for {file_name!r}: {e}. Falling back to Tesseract."
+            )
+
+    # 2. Local Tesseract fallback.
+    try:
+        import pytesseract  # type: ignore
+        from pdf2image import convert_from_bytes  # type: ignore
+    except Exception as e:
+        logger.warning(
+            f"OCR fallback unavailable for {file_name!r} (missing pytesseract/pdf2image: {e}). "
+            "Scanned PDF will index without text."
+        )
+        return ""
+
+    try:
+        images = convert_from_bytes(
+            pdf_bytes, dpi=PDF_OCR_DPI, first_page=1, last_page=PDF_OCR_MAX_PAGES
+        )
+    except Exception as e:
+        logger.warning(f"pdf2image rendering failed for {file_name!r}: {e}")
+        return ""
+
+    page_texts: list[str] = []
+    for page_num, image in enumerate(images, start=1):
+        try:
+            page_texts.append(pytesseract.image_to_string(image) or "")
+        except Exception as e:
+            logger.warning(
+                f"Tesseract OCR failed on page {page_num} of {file_name!r}: {e}"
+            )
+
+    ocr_text = TEXT_SECTION_SEPARATOR.join(t for t in page_texts if t.strip())
+    if ocr_text.strip():
+        logger.info(
+            f"OCR_USED=true engine=tesseract pages={len(page_texts)} file={file_name!r}"
+        )
+    return ocr_text
+
+
 def read_pdf_file(
     file: IO[Any],
     pdf_pass: str | None = None,
@@ -265,6 +336,21 @@ def read_pdf_file(
         text = TEXT_SECTION_SEPARATOR.join(
             page.extract_text() for page in pdf_reader.pages
         )
+
+        # Audit fix #5: scanned / image-only PDFs have no text layer, so
+        # extract_text() returns (near) empty. Rather than silently dropping the
+        # document downstream, run OCR and continue indexing.
+        from docubrain.configs.app_configs import ENABLE_PDF_OCR
+
+        if ENABLE_PDF_OCR and not text.strip():
+            try:
+                file.seek(0)
+                pdf_bytes = file.read()
+            except Exception:
+                pdf_bytes = b""
+            ocr_text = ocr_pdf_to_text(pdf_bytes, file_name="")
+            if ocr_text.strip():
+                text = ocr_text
 
         if extract_images:
             for page_num, page in enumerate(pdf_reader.pages):
@@ -568,6 +654,124 @@ def xlsx_to_text(file: IO[Any], file_name: str = "") -> str:
         text_content.append("\n".join(lines))
         
     return TEXT_SECTION_SEPARATOR.join(text_content)
+
+
+def xlsx_to_row_records(
+    file: IO[Any],
+    file_name: str = "",
+) -> list[dict[str, Any]]:
+    """Parse an XLSX/XLS file into per-row record dicts for structured indexing.
+
+    Each returned dict has:
+      - ``text``: a natural-language representation of the row
+        (e.g. "Name: Abhiram Chowdary Y | Designation: Software Developer - Intern")
+      - ``sheet_name``: originating worksheet name
+      - ``row_index``: 0-based data-row index (excludes header)
+      - ``fields``: dict mapping column header → cell value
+      - ``file_name``: the source file name
+    """
+    try:
+        workbook = openpyxl.load_workbook(file, read_only=True)
+    except BadZipFile as e:
+        logger.warning(f"xlsx_to_row_records: bad zip for {file_name}: {e}")
+        return []
+    except Exception as e:
+        if any(s in str(e) for s in KNOWN_OPENPYXL_BUGS):
+            logger.error(f"xlsx_to_row_records: openpyxl bug for {file_name}: {e}")
+            return []
+        raise
+
+    records: list[dict[str, Any]] = []
+
+    for sheet in workbook.worksheets:
+        matrix = _worksheet_to_matrix(sheet)
+        if not matrix or len(matrix) < 2:
+            continue
+
+        headers = [
+            cell.strip() if cell else f"Column_{i}"
+            for i, cell in enumerate(matrix[0])
+        ]
+
+        # Skip sheets where the header row is entirely empty
+        if all(h.startswith("Column_") for h in headers):
+            continue
+
+        for row_idx, row in enumerate(matrix[1:]):
+            fields: dict[str, str] = {}
+            all_empty = True
+            for col_idx, cell in enumerate(row):
+                header = headers[col_idx] if col_idx < len(headers) else f"Column_{col_idx}"
+                val = cell.strip() if cell else ""
+                val = val.replace("\n", " ").replace("\r", " ")
+                fields[header] = val
+                if val:
+                    all_empty = False
+
+            if all_empty:
+                continue
+
+            # Build natural-language text: "Header1: Value1 | Header2: Value2 | ..."
+            text_parts = [f"{k}: {v}" for k, v in fields.items() if v]
+            record_text = " | ".join(text_parts)
+            record_text = f"Record from {file_name} — {sheet.title}:\n{record_text}"
+
+            records.append({
+                "text": record_text,
+                "sheet_name": sheet.title,
+                "row_index": row_idx,
+                "fields": fields,
+                "file_name": file_name,
+            })
+
+    return records
+
+
+def csv_text_to_row_records(
+    csv_text: str,
+    file_name: str = "",
+    sheet_name: str = "Sheet1",
+) -> list[dict[str, Any]]:
+    """Parse CSV text (e.g. from Google Sheets export) into per-row records.
+
+    Same output format as ``xlsx_to_row_records``.
+    """
+    records: list[dict[str, Any]] = []
+    reader = csv.reader(io.StringIO(csv_text))
+    rows = list(reader)
+    if len(rows) < 2:
+        return records
+
+    headers = [h.strip() if h.strip() else f"Column_{i}" for i, h in enumerate(rows[0])]
+    if all(h.startswith("Column_") for h in headers):
+        return records
+
+    for row_idx, row in enumerate(rows[1:]):
+        fields: dict[str, str] = {}
+        all_empty = True
+        for col_idx, cell in enumerate(row):
+            header = headers[col_idx] if col_idx < len(headers) else f"Column_{col_idx}"
+            val = cell.strip().replace("\n", " ").replace("\r", " ")
+            fields[header] = val
+            if val:
+                all_empty = False
+
+        if all_empty:
+            continue
+
+        text_parts = [f"{k}: {v}" for k, v in fields.items() if v]
+        record_text = " | ".join(text_parts)
+        record_text = f"Record from {file_name} — {sheet_name}:\n{record_text}"
+
+        records.append({
+            "text": record_text,
+            "sheet_name": sheet_name,
+            "row_index": row_idx,
+            "fields": fields,
+            "file_name": file_name,
+        })
+
+    return records
 
 
 def eml_to_text(file: IO[Any]) -> str:
