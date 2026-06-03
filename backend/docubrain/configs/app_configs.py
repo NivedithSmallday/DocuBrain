@@ -811,6 +811,22 @@ MINI_CHUNK_SIZE = 150
 # This is the number of regular chunks per large chunk
 LARGE_CHUNK_RATIO = 4
 
+# Audit fix #7: chunk overlap as a percentage of the chunk token limit. A small
+# overlap (~10-15%) keeps facts that straddle a chunk boundary retrievable in at
+# least one chunk. Set to 0 to restore the previous no-overlap behavior.
+CHUNK_OVERLAP_PERCENT = int(os.environ.get("CHUNK_OVERLAP_PERCENT") or 15)
+
+# Audit fix #5: OCR fallback for scanned / image-only PDFs. When a PDF has no
+# extractable text layer, run OCR (Unstructured if configured, else local
+# Tesseract) instead of silently dropping the document. Requires the optional
+# `pytesseract` + `pdf2image` packages and a Tesseract binary on the host for the
+# local path; degrades gracefully (logs a warning) if they are unavailable.
+ENABLE_PDF_OCR = (os.environ.get("ENABLE_PDF_OCR") or "true").lower() == "true"
+# Hard cap on pages OCR'd per PDF to bound latency/cost on very large scans.
+PDF_OCR_MAX_PAGES = int(os.environ.get("PDF_OCR_MAX_PAGES") or 50)
+# Rendering DPI for the local Tesseract path.
+PDF_OCR_DPI = int(os.environ.get("PDF_OCR_DPI") or 200)
+
 # The maximum number of chunks that can be held for 1 document processing batch
 # The purpose of this is to set an upper bound on memory usage
 MAX_CHUNKS_PER_DOC_BATCH = int(os.environ.get("MAX_CHUNKS_PER_DOC_BATCH") or 1000)
@@ -1084,6 +1100,63 @@ MCP_SERVER_CORS_ORIGINS = [
     if origin.strip()
 ]
 
+MCP_DEFAULT_SERVER_URL = os.environ.get(
+    "MCP_DEFAULT_SERVER_URL",
+    f"http://mcp_server:{MCP_SERVER_PORT}",
+)
+
+GOOGLE_WORKSPACE_MCP_ENABLED = (
+    os.environ.get("GOOGLE_WORKSPACE_MCP_ENABLED", "").lower() == "true"
+)
+GOOGLE_WORKSPACE_CLIENT_ID = (
+    os.environ.get("GOOGLE_WORKSPACE_CLIENT_ID")
+    or os.environ.get("GOOGLE_CLIENT_ID")
+    or os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
+    or os.environ.get("OAUTH_GOOGLE_DRIVE_CLIENT_ID")
+    or ""
+)
+GOOGLE_WORKSPACE_CLIENT_SECRET = (
+    os.environ.get("GOOGLE_WORKSPACE_CLIENT_SECRET")
+    or os.environ.get("GOOGLE_CLIENT_SECRET")
+    or os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
+    or os.environ.get("OAUTH_GOOGLE_DRIVE_CLIENT_SECRET")
+    or ""
+)
+GOOGLE_WORKSPACE_REDIRECT_PATH = os.environ.get(
+    "GOOGLE_WORKSPACE_REDIRECT_PATH",
+    "/api/google-workspace-oauth/callback",
+)
+_GOOGLE_WORKSPACE_SCOPES_RAW = os.environ.get(
+    "GOOGLE_WORKSPACE_SCOPES",
+    "https://www.googleapis.com/auth/gmail.readonly "
+    "https://www.googleapis.com/auth/drive.readonly",
+)
+GOOGLE_WORKSPACE_SCOPES = [
+    scope.strip()
+    for scope in _GOOGLE_WORKSPACE_SCOPES_RAW.replace(",", " ").split()
+    if scope.strip()
+]
+
+
+# MCP Drive Indexing
+MCP_DRIVE_INDEXING_MAX_PAGES = int(
+    os.environ.get("MCP_DRIVE_INDEXING_MAX_PAGES", "4")
+)
+MCP_DRIVE_INDEXING_BATCH_SIZE = int(
+    os.environ.get("MCP_DRIVE_INDEXING_BATCH_SIZE", "20")
+)
+MCP_DRIVE_INDEXING_INTERVAL_MINUTES = int(
+    os.environ.get("MCP_DRIVE_INDEXING_INTERVAL_MINUTES", "30")
+)
+MAX_MCP_EXPORT_BYTES = int(
+    os.environ.get("MAX_MCP_EXPORT_BYTES", str(10 * 1024 * 1024))  # 10MB
+)
+MCP_DRIVE_STALE_THRESHOLD_SYNCS = int(
+    os.environ.get("MCP_DRIVE_STALE_THRESHOLD_SYNCS", "5")
+)
+MCP_DRIVE_STALE_TASK_TIMEOUT_HOURS = int(
+    os.environ.get("MCP_DRIVE_STALE_TASK_TIMEOUT_HOURS", "2")
+)
 
 POD_NAME = os.environ.get("POD_NAME")
 POD_NAMESPACE = os.environ.get("POD_NAMESPACE")

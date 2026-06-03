@@ -54,6 +54,27 @@ def register_ollama_models() -> None:
             "ollama/deepseek-v3.1:latest": {"supports_function_calling": True},
             "ollama/deepseek-v3.1:671b": {"supports_function_calling": True},
             "ollama/deepseek-v3.1:671b-cloud": {"supports_function_calling": True},
+            # Llama 3.1 models
+            "ollama_chat/llama3.1:latest": {"supports_function_calling": True},
+            "ollama_chat/llama3.1:8b": {"supports_function_calling": True},
+            "ollama_chat/llama3.1:70b": {"supports_function_calling": True},
+            "ollama_chat/llama3.1:405b": {"supports_function_calling": True},
+            "ollama/llama3.1:latest": {"supports_function_calling": True},
+            "ollama/llama3.1:8b": {"supports_function_calling": True},
+            "ollama/llama3.1:70b": {"supports_function_calling": True},
+            "ollama/llama3.1:405b": {"supports_function_calling": True},
+            # Llama 3.2 models
+            "ollama_chat/llama3.2:latest": {"supports_function_calling": True},
+            "ollama_chat/llama3.2:1b": {"supports_function_calling": True},
+            "ollama_chat/llama3.2:3b": {"supports_function_calling": True},
+            "ollama/llama3.2:latest": {"supports_function_calling": True},
+            "ollama/llama3.2:1b": {"supports_function_calling": True},
+            "ollama/llama3.2:3b": {"supports_function_calling": True},
+            # Llama 3.3 models
+            "ollama_chat/llama3.3:latest": {"supports_function_calling": True},
+            "ollama_chat/llama3.3:70b": {"supports_function_calling": True},
+            "ollama/llama3.3:latest": {"supports_function_calling": True},
+            "ollama/llama3.3:70b": {"supports_function_calling": True},
             # Gemma3 models
             "ollama_chat/gemma3:latest": {"supports_function_calling": True},
             "ollama_chat/gemma3:270m": {"supports_function_calling": True},
@@ -68,6 +89,8 @@ def register_ollama_models() -> None:
             "ollama/gemma3:12b": {"supports_function_calling": True},
             "ollama/gemma3:27b": {"supports_function_calling": True},
             # Qwen models
+            "ollama_chat/qwen3:latest": {"supports_function_calling": True},
+            "ollama_chat/qwen3:8b": {"supports_function_calling": True},
             "ollama_chat/qwen3-coder:latest": {"supports_function_calling": True},
             "ollama_chat/qwen3-coder:30b": {"supports_function_calling": True},
             "ollama_chat/qwen3-coder:480b": {"supports_function_calling": True},
@@ -83,6 +106,8 @@ def register_ollama_models() -> None:
             "ollama_chat/qwen3-vl:235b-instruct-cloud": {
                 "supports_function_calling": True
             },
+            "ollama/qwen3:latest": {"supports_function_calling": True},
+            "ollama/qwen3:8b": {"supports_function_calling": True},
             "ollama/qwen3-coder:latest": {"supports_function_calling": True},
             "ollama/qwen3-coder:30b": {"supports_function_calling": True},
             "ollama/qwen3-coder:480b": {"supports_function_calling": True},
