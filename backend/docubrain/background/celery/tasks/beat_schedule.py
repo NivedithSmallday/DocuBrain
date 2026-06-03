@@ -8,6 +8,7 @@ from docubrain.configs.app_configs import AUTO_LLM_CONFIG_URL
 from docubrain.configs.app_configs import AUTO_LLM_UPDATE_INTERVAL_SECONDS
 from docubrain.configs.app_configs import DISABLE_VECTOR_DB
 from docubrain.configs.app_configs import ENABLE_OPENSEARCH_INDEXING_FOR_DOCUBRAIN
+from docubrain.configs.app_configs import MCP_DRIVE_INDEXING_INTERVAL_MINUTES
 from docubrain.configs.app_configs import SCHEDULED_EVAL_DATASET_NAMES
 from docubrain.configs.constants import DOCUBRAIN_CLOUD_CELERY_TASK_PREFIX
 from docubrain.configs.constants import DocubrainCeleryPriority
@@ -64,6 +65,15 @@ beat_task_templates: list[dict] = [
         "schedule": timedelta(seconds=15),
         "options": {
             "priority": DocubrainCeleryPriority.MEDIUM,
+            "expires": BEAT_EXPIRES_DEFAULT,
+        },
+    },
+    {
+        "name": "check-for-mcp-drive-indexing",
+        "task": DocubrainCeleryTask.CHECK_FOR_MCP_DRIVE_INDEXING,
+        "schedule": timedelta(minutes=MCP_DRIVE_INDEXING_INTERVAL_MINUTES),
+        "options": {
+            "priority": DocubrainCeleryPriority.LOW,
             "expires": BEAT_EXPIRES_DEFAULT,
         },
     },

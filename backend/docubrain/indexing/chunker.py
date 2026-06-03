@@ -4,6 +4,7 @@ from chonkie import SentenceChunker
 
 from docubrain.configs.app_configs import AVERAGE_SUMMARY_EMBEDDINGS
 from docubrain.configs.app_configs import BLURB_SIZE
+from docubrain.configs.app_configs import CHUNK_OVERLAP_PERCENT
 from docubrain.configs.app_configs import LARGE_CHUNK_RATIO
 from docubrain.configs.app_configs import MINI_CHUNK_SIZE
 from docubrain.configs.app_configs import SKIP_METADATA_IN_CHUNK
@@ -161,6 +162,12 @@ class Chunker:
         def token_counter(text: str) -> int:
             return len(tokenizer.encode(text))
 
+        # Derive token overlap from CHUNK_OVERLAP_PERCENT (0 disables overlap).
+        effective_chunk_overlap = chunk_overlap or int(
+            chunk_token_limit * CHUNK_OVERLAP_PERCENT / 100
+        )
+        self.chunk_overlap = effective_chunk_overlap
+
         self.blurb_splitter = SentenceChunker(
             tokenizer_or_token_counter=token_counter,
             chunk_size=blurb_size,
@@ -171,7 +178,7 @@ class Chunker:
         self.chunk_splitter = SentenceChunker(
             tokenizer_or_token_counter=token_counter,
             chunk_size=chunk_token_limit,
-            chunk_overlap=chunk_overlap,
+            chunk_overlap=effective_chunk_overlap,
             return_type="texts",
         )
 
@@ -185,6 +192,66 @@ class Chunker:
             if enable_multipass
             else None
         )
+
+    @staticmethod
+    def _is_markdown_table(text: str) -> bool:
+        """Detect if text is a markdown table (has pipe-delimited rows)."""
+        lines = text.strip().split("\n")
+        if len(lines) < 2:
+            return False
+        pipe_lines = sum(1 for line in lines if line.strip().startswith("|") and line.strip().endswith("|"))
+        return pipe_lines >= 2 and pipe_lines / len(lines) > 0.5
+
+    def _split_markdown_table(self, text: str, content_token_limit: int) -> list[str]:
+        """Split a markdown table on row boundaries, repeating the header per chunk."""
+        lines = text.strip().split("\n")
+        header_lines: list[str] = []
+        data_rows: list[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            if not data_rows and (
+                stripped.startswith("|---") or stripped.startswith("| ---")
+                or (header_lines and all(c in "-| " for c in stripped))
+            ):
+                header_lines.append(line)
+            elif not data_rows and not header_lines:
+                header_lines.append(line)
+            elif not data_rows and header_lines and stripped.startswith("|"):
+                # Could be the separator row right after header
+                if all(c in "-| :" for c in stripped.replace("|", "").strip()):
+                    header_lines.append(line)
+                else:
+                    data_rows.append(line)
+            else:
+                data_rows.append(line)
+
+        if not data_rows:
+            return [text]
+
+        header_text = "\n".join(header_lines)
+        header_tokens = len(self.tokenizer.encode(header_text)) if header_lines else 0
+        available = content_token_limit - header_tokens - 5
+
+        chunks: list[str] = []
+        current_rows: list[str] = []
+        current_tokens = 0
+
+        for row in data_rows:
+            row_tokens = len(self.tokenizer.encode(row))
+            if current_tokens + row_tokens > available and current_rows:
+                chunk = header_text + "\n" + "\n".join(current_rows) if header_text else "\n".join(current_rows)
+                chunks.append(chunk)
+                current_rows = []
+                current_tokens = 0
+            current_rows.append(row)
+            current_tokens += row_tokens
+
+        if current_rows:
+            chunk = header_text + "\n" + "\n".join(current_rows) if header_text else "\n".join(current_rows)
+            chunks.append(chunk)
+
+        return chunks or [text]
 
     def _split_oversized_chunk(self, text: str, content_token_limit: int) -> list[str]:
         """
@@ -322,6 +389,38 @@ class Chunker:
             # CASE 2: Normal text section
             section_token_count = len(self.tokenizer.encode(section_text))
 
+            # Markdown table — split on row boundaries with header repeated per chunk.
+            if self._is_markdown_table(section_text):
+                if chunk_text.strip():
+                    self._create_chunk(
+                        document,
+                        chunks,
+                        chunk_text,
+                        link_offsets,
+                        False,
+                        title_prefix,
+                        metadata_suffix_semantic,
+                        metadata_suffix_keyword,
+                    )
+                    chunk_text = ""
+                    link_offsets = {}
+
+                table_splits = self._split_markdown_table(
+                    section_text, content_token_limit
+                )
+                for i, split_text in enumerate(table_splits):
+                    self._create_chunk(
+                        document,
+                        chunks,
+                        split_text,
+                        {0: section_link_text},
+                        is_continuation=(i != 0),
+                        title_prefix=title_prefix,
+                        metadata_suffix_semantic=metadata_suffix_semantic,
+                        metadata_suffix_keyword=metadata_suffix_keyword,
+                    )
+                continue
+
             # If the section is large on its own, split it separately
             if section_token_count > content_token_limit:
                 if chunk_text.strip():
@@ -338,8 +437,12 @@ class Chunker:
                     chunk_text = ""
                     link_offsets = {}
 
-                # chunker is in `text` mode
-                split_texts = cast(list[str], self.chunk_splitter.chunk(section_text))
+                # For markdown tables, split on row boundaries to preserve header context
+                if self._is_markdown_table(section_text):
+                    split_texts = self._split_markdown_table(section_text, content_token_limit)
+                else:
+                    # chunker is in `text` mode
+                    split_texts = cast(list[str], self.chunk_splitter.chunk(section_text))
                 for i, split_text in enumerate(split_texts):
                     # If even the split_text is bigger than strict limit, further split
                     if (

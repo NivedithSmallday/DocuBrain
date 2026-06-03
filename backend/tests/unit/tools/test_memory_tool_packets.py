@@ -15,6 +15,7 @@ from docubrain.server.query_and_chat.streaming_models import SectionEnd
 from docubrain.tools.tool_implementations.memory.memory_tool import MemoryTool
 from docubrain.tools.tool_implementations.memory.memory_tool import MemoryToolOverrideKwargs
 from docubrain.tools.tool_implementations.memory.models import MemoryToolResponse
+from docubrain.tools.tool_implementations.memory.privacy import SENSITIVE_MEMORY_REFUSAL
 
 
 @pytest.fixture
@@ -151,6 +152,26 @@ class TestMemoryToolRun:
         assert result.rich_response.memory_text == "User prefers Python"
         assert result.rich_response.index_to_replace is None
         assert "User prefers Python" in result.llm_facing_response
+
+    @patch("docubrain.tools.tool_implementations.memory.memory_tool.process_memory_update")
+    def test_run_rejects_sensitive_personal_memory(
+        self,
+        mock_process: MagicMock,
+        memory_tool: MemoryTool,
+        emitter_queue: queue.Queue,
+        placement: Placement,
+        override_kwargs: MemoryToolOverrideKwargs,
+    ) -> None:
+        result = memory_tool.run(
+            placement=placement,
+            override_kwargs=override_kwargs,
+            memory="User date of birth is 01/02/1990",
+        )
+
+        mock_process.assert_not_called()
+        assert result.rich_response is None
+        assert result.llm_facing_response == SENSITIVE_MEMORY_REFUSAL
+        assert emitter_queue.empty()
 
 
 class TestCreateMemoryPackets:

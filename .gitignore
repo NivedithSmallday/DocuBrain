@@ -8,6 +8,8 @@
 .cursor
 !/.cursor/mcp.json
 !/.cursor/skills/
+/.claude/*
+!/.claude/skills/*
 
 # macos
 .DS_store
@@ -18,7 +20,11 @@
 .idea
 
 # testing
+backend/tests/unit/docubrain/
 /web/test-results/
+backend/tests/unit/docubrain/chat/
+backend/tests/unit/docubrain/mcp/
+backend/tests/unit/docubrain/mcp_server/
 backend/docubrain/agent_search/main/test_data.json
 backend/tests/regression/answer_quality/test_data.json
 backend/tests/regression/search_quality/eval-*

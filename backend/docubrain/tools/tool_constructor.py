@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 from docubrain.auth.oauth_token_manager import OAuthTokenManager
 from docubrain.chat.emitter import Emitter
 from docubrain.configs.app_configs import DISABLE_VECTOR_DB
-from docubrain.configs.model_configs import GEN_AI_TEMPERATURE
 from docubrain.context.search.models import BaseFilters
 from docubrain.context.search.models import PersonaSearchInfo
 from docubrain.db.enums import MCPAuthenticationPerformer
@@ -93,10 +92,9 @@ def construct_tools(
     to avoid lazy SQL queries after the session may have been flushed."""
     tool_dict: dict[int, list[Tool]] = {}
 
-    # Log which tools are attached to the persona for debugging
-    persona_tool_names = [t.name for t in persona.tools]
-    logger.debug(
-        f"Constructing tools for persona '{persona.name}' (id={persona.id}): {persona_tool_names}"
+    logger.info(
+        "construct_tools: persona '%s' (id=%s) has %d tools",
+        persona.name, persona.id, len(persona.tools),
     )
 
     mcp_tool_cache: dict[int, dict[int, MCPTool]] = {}
@@ -282,6 +280,10 @@ def construct_tools(
 
         # Handle MCP tools
         elif db_tool_model.mcp_server_id:
+            logger.debug(
+                f"construct_tools: processing MCP tool '{db_tool_model.name}' "
+                f"(id={db_tool_model.id}, mcp_server_id={db_tool_model.mcp_server_id})"
+            )
             if db_tool_model.mcp_server_id in mcp_tool_cache:
                 tool_dict[db_tool_model.id] = [
                     mcp_tool_cache[db_tool_model.mcp_server_id][db_tool_model.id]
@@ -296,13 +298,43 @@ def construct_tools(
             mcp_user_oauth_token = None
 
             if mcp_server.auth_type == MCPAuthenticationType.PT_OAUTH:
-                # Pass-through OAuth: use the user's login OAuth token
+                # Pass-through OAuth: use an internal MCP token for the
+                # built-in Google Workspace MCP server so the backend API
+                # can resolve the calling user and load their Google
+                # credentials from the database.  For all other PT_OAUTH
+                # servers fall back to the user's login OAuth token.
                 if user.is_anonymous:
                     logger.warning(
                         f"Anonymous user cannot use PT_OAUTH MCP server {mcp_server.id}"
                     )
                     continue
-                mcp_user_oauth_token = user_oauth_token
+
+                from docubrain.server.features.mcp.bootstrap import (
+                    DEFAULT_DOCUBRAIN_MCP_SERVER_NAME,
+                )
+
+                if mcp_server.name == DEFAULT_DOCUBRAIN_MCP_SERVER_NAME:
+                    from docubrain.mcp.internal_auth import (
+                        create_internal_mcp_token,
+                    )
+
+                    try:
+                        mcp_user_oauth_token = create_internal_mcp_token(
+                            user,
+                            tenant_id=getattr(user, "tenant_id", None),
+                        )
+                        logger.info(
+                            f"construct_tools: minted internal MCP token for user {user.email} "
+                            f"(token length={len(mcp_user_oauth_token) if mcp_user_oauth_token else 0})"
+                        )
+                    except Exception:
+                        logger.exception(
+                            "construct_tools: FAILED to mint internal MCP token for user %s",
+                            user.email,
+                        )
+                        continue
+                else:
+                    mcp_user_oauth_token = user_oauth_token
             elif (
                 mcp_server.auth_type == MCPAuthenticationType.API_TOKEN
                 or mcp_server.auth_type == MCPAuthenticationType.OAUTH
@@ -318,6 +350,10 @@ def construct_tools(
 
             # Get all saved tools for this MCP server
             saved_tools = get_all_mcp_tools_for_server(mcp_server.id, db_session)
+            logger.debug(
+                f"construct_tools: MCP server '{mcp_server.name}' (id={mcp_server.id}) "
+                f"has {len(saved_tools)} saved tools, auth_type={mcp_server.auth_type}"
+            )
 
             # Find the specific tool that this database entry represents
             expected_tool_name = db_tool_model.display_name
@@ -387,5 +423,10 @@ def construct_tools(
     tools: list[Tool] = []
     for tool_list in tool_dict.values():
         tools.extend(tool_list)
+
+    logger.info(
+        f"construct_tools: FINAL result — {len(tools)} tools constructed: "
+        f"{[t.name for t in tools]}"
+    )
 
     return tool_dict

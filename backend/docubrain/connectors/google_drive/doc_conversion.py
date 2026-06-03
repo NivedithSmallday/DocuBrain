@@ -34,6 +34,7 @@ from docubrain.file_processing.extract_file_text import get_file_ext
 from docubrain.file_processing.extract_file_text import pptx_to_text
 from docubrain.file_processing.extract_file_text import read_docx_file
 from docubrain.file_processing.extract_file_text import read_pdf_file
+from docubrain.file_processing.extract_file_text import xlsx_to_row_records
 from docubrain.file_processing.extract_file_text import xlsx_to_text
 from docubrain.file_processing.file_types import DocubrainFileExtensions
 from docubrain.file_processing.file_types import DocubrainMimeTypes
@@ -192,17 +193,23 @@ _FALLBACK_WEB_VIEW_LINK_TEMPLATES = {
 MAX_RETRIEVER_EMAILS = 20
 CHUNK_SIZE_BUFFER = 64  # extra bytes past the limit to read
 
-# Mapping of Google Drive mime types to export formats
+# Mapping of Google Drive mime types to export formats.
+# Sheets exported as XLSX to capture ALL tabs (CSV only exports the first sheet).
+# Docs exported as DOCX (not text/plain) so tables keep their structure —
+# parsed via markitdown into markdown tables, like native .docx ingestion.
+DOCX_EXPORT_MIME_TYPE = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
 GOOGLE_MIME_TYPES_TO_EXPORT = {
-    GDriveMimeType.DOC.value: "text/plain",
-    GDriveMimeType.SPREADSHEET.value: "text/csv",
+    GDriveMimeType.DOC.value: DOCX_EXPORT_MIME_TYPE,
+    GDriveMimeType.SPREADSHEET.value: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     GDriveMimeType.PPT.value: "text/plain",
 }
 
 # Define Google MIME types mapping
 GOOGLE_MIME_TYPES = {
     GDriveMimeType.DOC.value: "text/plain",
-    GDriveMimeType.SPREADSHEET.value: "text/csv",
+    GDriveMimeType.SPREADSHEET.value: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     GDriveMimeType.PPT.value: "text/plain",
 }
 
@@ -323,10 +330,9 @@ def _download_and_extract_sections_basic(
             logger.error(f"Failed to process image {file_name}: {e}")
         return sections
 
-    # For Google Docs, Sheets, and Slides, export as plain text
+    # For Google Docs, Sheets, and Slides, export in the configured format
     if mime_type in GOOGLE_MIME_TYPES_TO_EXPORT:
         export_mime_type = GOOGLE_MIME_TYPES_TO_EXPORT[mime_type]
-        # Use the correct API call for exporting files
         request = service.files().export_media(
             fileId=file_id, mimeType=export_mime_type
         )
@@ -335,6 +341,48 @@ def _download_and_extract_sections_basic(
             logger.warning(f"Failed to export {file_name} as {export_mime_type}")
             return []
 
+        # Google Sheets: exported as XLSX (binary) to capture ALL tabs.
+        # Parse with xlsx_to_row_records for per-row structured indexing.
+        if mime_type == GDriveMimeType.SPREADSHEET.value:
+            row_records = xlsx_to_row_records(
+                io.BytesIO(response), file_name=file_name
+            )
+            if row_records:
+                return [
+                    TextSection(link=link, text=rec["text"])
+                    for rec in row_records
+                ]
+            # Fall back to monolithic table text
+            text = xlsx_to_text(io.BytesIO(response), file_name=file_name)
+            return [TextSection(link=link, text=text)] if text else []
+
+        # Google Docs: exported as DOCX, parsed via markitdown to retain tables.
+        if mime_type == GDriveMimeType.DOC.value:
+            try:
+                text, _ = read_docx_file(io.BytesIO(response), file_name=file_name)
+                if text and text.strip():
+                    return [TextSection(link=link, text=text)]
+                logger.warning(
+                    f"DOCX export of {file_name} produced empty text; skipping."
+                )
+                return []
+            except Exception as e:
+                logger.warning(
+                    f"Failed to parse DOCX export for {file_name}: {e}. "
+                    "Falling back to plain-text export."
+                )
+                # Best-effort fallback: re-export as plain text.
+                fallback_request = service.files().export_media(
+                    fileId=file_id, mimeType="text/plain"
+                )
+                fallback_response = _download_request(
+                    fallback_request, file_id, size_threshold
+                )
+                if not fallback_response:
+                    return []
+                return [TextSection(link=link, text=fallback_response.decode("utf-8"))]
+
+        # Slides: plain text export
         text = response.decode("utf-8")
         return [TextSection(link=link, text=text)]
 
@@ -357,7 +405,16 @@ def _download_and_extract_sections_basic(
     elif (
         mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     ):
-        text = xlsx_to_text(io.BytesIO(response_call()), file_name=file_name)
+        file_bytes = io.BytesIO(response_call())
+        row_records = xlsx_to_row_records(file_bytes, file_name=file_name)
+        if row_records:
+            return [
+                TextSection(link=link, text=rec["text"])
+                for rec in row_records
+            ]
+        # Fall back to monolithic text if row parsing yields nothing
+        file_bytes.seek(0)
+        text = xlsx_to_text(file_bytes, file_name=file_name)
         return [TextSection(link=link, text=text)] if text else []
 
     elif (

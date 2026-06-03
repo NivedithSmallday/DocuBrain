@@ -34,6 +34,47 @@ SIM_SCORE_RANGE_HIGH = float(os.environ.get("SIM_SCORE_RANGE_HIGH") or 1.0)
 # Certain models like e5, BGE, etc use a prefix for asymmetric retrievals (query generally shorter than docs)
 ASYM_QUERY_PREFIX = os.environ.get("ASYM_QUERY_PREFIX", "search_query: ")
 ASYM_PASSAGE_PREFIX = os.environ.get("ASYM_PASSAGE_PREFIX", "search_document: ")
+
+# Auto-fill nomic-style embedding task prefixes when the DB row omits them.
+AUTO_FILL_EMBEDDING_PREFIXES = (
+    os.environ.get("AUTO_FILL_EMBEDDING_PREFIXES") or "true"
+).lower() == "true"
+
+# Local model-name fragments that use the nomic-style search_query/search_document
+# task instructions.
+_NOMIC_STYLE_MODEL_FRAGMENTS = ("nomic-embed", "nomic-ai/")
+
+
+def resolve_embedding_prefixes(
+    model_name: str | None,
+    provider_type: object | None,
+    query_prefix: str | None,
+    passage_prefix: str | None,
+) -> tuple[str | None, str | None]:
+    """Return (query_prefix, passage_prefix), auto-filling nomic task prefixes.
+
+    Only fills when:
+      - the feature flag is enabled,
+      - the model is a local/self-hosted model (provider_type is None — cloud
+        providers like OpenAI/Cohere/Voyage do NOT use these text prefixes), and
+      - the model name is a nomic-style model, and
+      - the corresponding stored prefix is missing/empty.
+
+    Existing non-empty prefixes are always preserved (backward compatible).
+    """
+    if not AUTO_FILL_EMBEDDING_PREFIXES:
+        return query_prefix, passage_prefix
+    if provider_type is not None:
+        return query_prefix, passage_prefix
+    name = (model_name or "").lower()
+    if not any(fragment in name for fragment in _NOMIC_STYLE_MODEL_FRAGMENTS):
+        return query_prefix, passage_prefix
+
+    resolved_query = query_prefix if (query_prefix or "").strip() else ASYM_QUERY_PREFIX
+    resolved_passage = (
+        passage_prefix if (passage_prefix or "").strip() else ASYM_PASSAGE_PREFIX
+    )
+    return resolved_query, resolved_passage
 # Purely an optimization, memory limitation consideration
 
 # User's set embedding batch size overrides the default encoding batch sizes

@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 from collections.abc import Callable
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -17,9 +20,11 @@ from docubrain.prompts.prompt_utils import get_company_context
 from docubrain.prompts.prompt_utils import handle_docubrain_date_awareness
 from docubrain.prompts.prompt_utils import replace_citation_guidance_tag
 from docubrain.prompts.prompt_utils import replace_reminder_tag
+from docubrain.prompts.tool_prompts import GOOGLE_WORKSPACE_ROUTING_GUIDANCE
 from docubrain.prompts.tool_prompts import INTERNAL_SEARCH_GUIDANCE
 from docubrain.prompts.tool_prompts import MEMORY_GUIDANCE
 from docubrain.prompts.tool_prompts import OPEN_URLS_GUIDANCE
+from docubrain.prompts.tool_prompts import ROUTING_HINT_TEMPLATE
 from docubrain.prompts.tool_prompts import TOOL_DESCRIPTION_SEARCH_GUIDANCE
 from docubrain.prompts.tool_prompts import TOOL_SECTION_HEADER
 from docubrain.prompts.user_info import BASIC_INFORMATION_PROMPT
@@ -29,10 +34,24 @@ from docubrain.prompts.user_info import USER_MEMORIES_PROMPT
 from docubrain.prompts.user_info import USER_PREFERENCES_PROMPT
 from docubrain.prompts.user_info import USER_ROLE_PROMPT
 from docubrain.tools.interface import Tool
+from docubrain.tools.tool_implementations.custom.custom_tool import CustomTool
+from docubrain.tools.tool_implementations.mcp.mcp_tool import MCPTool
 from docubrain.tools.tool_implementations.memory.memory_tool import MemoryTool
 from docubrain.tools.tool_implementations.open_url.open_url_tool import OpenURLTool
 from docubrain.tools.tool_implementations.search.search_tool import SearchTool
+from docubrain.server.features.mcp.google_workspace_oauth import (
+    DRIVE_TOOL_NAMES,
+    GMAIL_TOOL_NAMES,
+)
 from docubrain.utils.timing import log_function_time
+
+if TYPE_CHECKING:
+    from docubrain.chat.retrieval_router_models import RoutingDecision
+
+# Derived from the canonical sets in google_workspace_oauth.py to avoid drift.
+_GOOGLE_WORKSPACE_TOOL_NAMES: frozenset[str] = frozenset(
+    GMAIL_TOOL_NAMES | DRIVE_TOOL_NAMES
+)
 
 
 def get_default_base_system_prompt(db_session: Session) -> str:
@@ -191,6 +210,7 @@ def build_system_prompt(
     tools: Sequence[Tool] | None = None,
     should_cite_documents: bool = False,
     include_all_guidance: bool = False,
+    routing_hint: RoutingDecision | None = None,
 ) -> str:
     """Should only be called with the default behavior system prompt.
     If the user has replaced the default behavior prompt with their custom agent prompt, do not call this function.
@@ -222,6 +242,7 @@ def build_system_prompt(
         tool_sections = [
             TOOL_DESCRIPTION_SEARCH_GUIDANCE,
             INTERNAL_SEARCH_GUIDANCE,
+            GOOGLE_WORKSPACE_ROUTING_GUIDANCE,
             OPEN_URLS_GUIDANCE,
             MEMORY_GUIDANCE,
         ]
@@ -232,23 +253,46 @@ def build_system_prompt(
         has_internal_search = any(isinstance(tool, SearchTool) for tool in tools)
         has_open_urls = any(isinstance(tool, OpenURLTool) for tool in tools)
         has_memory = any(isinstance(tool, MemoryTool) for tool in tools)
+        has_google_workspace = any(
+            isinstance(tool, (CustomTool, MCPTool))
+            and tool.name in _GOOGLE_WORKSPACE_TOOL_NAMES
+            for tool in tools
+        )
 
         tool_guidance_sections: list[str] = []
 
-        if has_internal_search or include_all_guidance:
+        if has_internal_search:
             tool_guidance_sections.append(TOOL_DESCRIPTION_SEARCH_GUIDANCE)
 
         # These are not included at the Tool level because the ordering may matter.
-        if has_internal_search or include_all_guidance:
+        if has_internal_search:
             tool_guidance_sections.append(INTERNAL_SEARCH_GUIDANCE)
 
-        if has_open_urls or include_all_guidance:
+        if has_google_workspace:
+            tool_guidance_sections.append(GOOGLE_WORKSPACE_ROUTING_GUIDANCE)
+
+        if has_open_urls:
             tool_guidance_sections.append(OPEN_URLS_GUIDANCE)
 
-        if has_memory or include_all_guidance:
+        if has_memory:
             tool_guidance_sections.append(MEMORY_GUIDANCE)
 
         if tool_guidance_sections:
             system_prompt += TOOL_SECTION_HEADER + "\n".join(tool_guidance_sections)
+
+        # Inject routing hint when confidence is sufficient
+        if routing_hint is not None and routing_hint.confidence >= 0.6:
+            preferred = routing_hint.preferred_tool_names
+            if preferred:
+                freshness_note = (
+                    "This query requires fresh/live data — prefer real-time tools over indexed search.\n"
+                    if routing_hint.freshness_required
+                    else ""
+                )
+                system_prompt += ROUTING_HINT_TEMPLATE.format(
+                    suggested_tools=", ".join(f"`{t}`" for t in preferred),
+                    reason=routing_hint.routing_reason,
+                    freshness_note=freshness_note,
+                )
 
     return system_prompt

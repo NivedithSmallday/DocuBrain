@@ -6,7 +6,6 @@ from typing import Any
 import httpx
 
 from docubrain.configs.constants import DocumentSource
-from docubrain.mcp_server.api import mcp_server
 from docubrain.mcp_server.utils import get_http_client
 from docubrain.mcp_server.utils import get_indexed_sources
 from docubrain.mcp_server.utils import require_access_token
@@ -32,7 +31,8 @@ def _extract_error_detail(response: httpx.Response) -> str:
     return f"Request failed with status {response.status_code}"
 
 
-@mcp_server.tool()
+# Not exposed as MCP tool to avoid duplicating the built-in SearchTool ("internal_search").
+# Still available as an internal helper for direct callers.
 async def search_indexed_documents(
     query: str,
     source_types: list[str] | None = None,
@@ -225,3 +225,10 @@ async def search_indexed_documents(
             "documents": [],
             "query": query,
         }
+
+
+# NOTE: The MCP "internal_search" wrapper was removed because it duplicated the
+# built-in SearchTool (which also exposes name="internal_search"). Having two tools
+# with the same name violates the function-calling protocol and destabilises routing.
+# Use the built-in SearchTool for internal_search; use search_indexed_documents above
+# for direct MCP-server callers.

@@ -11,6 +11,8 @@ from html import unescape
 from typing import Any
 from typing import cast
 
+import litellm
+
 from docubrain.chat.chat_state import ChatStateContainer
 from docubrain.chat.citation_processor import DynamicCitationProcessor
 from docubrain.chat.emitter import Emitter
@@ -74,6 +76,12 @@ _XML_PARAMETER_RE = re.compile(
 _FUNCTION_CALLS_OPEN_MARKER = "<function_calls"
 _FUNCTION_CALLS_CLOSE_MARKER = "</function_calls>"
 _TOOL_NAME_PATTERN = re.compile(r'"name"\s*:\s*"(?P<name>[^"]+)"')
+_BRACKETED_TOOL_CALL_RE = re.compile(
+    r"\[Tool Call\]\s*name=(?P<name>[^\s,]+)"
+    r"(?:\s+id=(?P<id>[^\s,]+))?"
+    r"\s+args=(?P<args>\{.*?\}|[^\n\r]*)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class _XmlToolCallContentFilter:
@@ -197,6 +205,55 @@ class _JsonToolCallContentFilter:
 
         remaining = self._pending
         self._pending = ""
+        return remaining
+
+
+_OLLAMA_TOOL_CALL_RE = re.compile(r"\[Tool Call\][^\n\r]*", re.IGNORECASE)
+_TOOL_CALL_HEADER_RE = re.compile(r"(?:^|\n)\s*Tool Call:\s*\n?")
+_BEST_MATCHING_FUNCTION_RE = re.compile(
+    r"(?:^|\n)\s*Best Matching Function[^\n]*\n?",
+)
+_MEMORY_CHECK_RE = re.compile(
+    r"(?:^|\n)\s*Memory Check[^\n]*\n?",
+)
+
+
+class _OllamaToolCallContentFilter:
+    """Streaming filter that strips Ollama-style ``[Tool Call]`` lines and
+    common model-internal artefacts (``Tool Call:``, ``Best Matching Function``,
+    ``Memory Check``) from the text streamed to the user."""
+
+    def __init__(self) -> None:
+        self._pending = ""
+
+    def process(self, content: str) -> str:
+        if not content:
+            return ""
+
+        self._pending += content
+
+        # Keep a short tail buffered so that a partial ``[Tool Call]`` split
+        # across chunks is handled correctly.
+        safe_emit_upto = max(0, len(self._pending) - 80)
+        if safe_emit_upto == 0:
+            return ""
+
+        emit = self._pending[:safe_emit_upto]
+        self._pending = self._pending[safe_emit_upto:]
+
+        emit = _OLLAMA_TOOL_CALL_RE.sub("", emit)
+        emit = _TOOL_CALL_HEADER_RE.sub("", emit)
+        emit = _BEST_MATCHING_FUNCTION_RE.sub("", emit)
+        emit = _MEMORY_CHECK_RE.sub("", emit)
+        return emit
+
+    def flush(self) -> str:
+        remaining = self._pending
+        self._pending = ""
+        remaining = _OLLAMA_TOOL_CALL_RE.sub("", remaining)
+        remaining = _TOOL_CALL_HEADER_RE.sub("", remaining)
+        remaining = _BEST_MATCHING_FUNCTION_RE.sub("", remaining)
+        remaining = _MEMORY_CHECK_RE.sub("", remaining)
         return remaining
 
 
@@ -330,6 +387,18 @@ def _normalize_tool_arg_value(
 
     if schema.get("type") == "array" and isinstance(normalized, str):
         return [normalized]
+
+    if schema.get("type") == "integer" and isinstance(normalized, str):
+        stripped = normalized.strip()
+        if re.fullmatch(r"[+-]?\d+", stripped):
+            return int(stripped)
+
+    if schema.get("type") == "number" and isinstance(normalized, str):
+        stripped = normalized.strip()
+        try:
+            return float(stripped)
+        except ValueError:
+            pass
 
     return normalized
 
@@ -574,8 +643,8 @@ def _update_tool_call_with_delta(
 
 def _extract_tool_call_kickoffs(
     id_to_tool_call_map: dict[int, dict[str, Any]],
-    tool_name_to_def: dict[str, dict],
     turn_index: int,
+    tool_name_to_def: dict[str, dict] | None = None,
     tab_index: int | None = None,
     sub_turn_index: int | None = None,
 ) -> list[ToolCallKickoff]:
@@ -596,18 +665,21 @@ def _extract_tool_call_kickoffs(
         if tool_call_data.get("id") and tool_call_data.get("name"):
             tool_name = tool_call_data["name"]
             tool_args = _parse_tool_args_to_dict(tool_call_data.get("arguments"))
-            normalized_args = _normalize_and_validate_tool_args(
-                tool_name=tool_name,
-                arguments=tool_args,
-                tool_name_to_def=tool_name_to_def,
-            )
-            if normalized_args is None:
-                logger.warning(
-                    "Skipping malformed native tool call for %s with args=%s",
-                    tool_name,
-                    tool_args,
+            if tool_name_to_def is None:
+                normalized_args = tool_args
+            else:
+                normalized_args = _normalize_and_validate_tool_args(
+                    tool_name=tool_name,
+                    arguments=tool_args,
+                    tool_name_to_def=tool_name_to_def,
                 )
-                continue
+                if normalized_args is None:
+                    logger.warning(
+                        "Skipping malformed native tool call for %s with args=%s",
+                        tool_name,
+                        tool_args,
+                    )
+                    continue
 
             tool_calls.append(
                 ToolCallKickoff(
@@ -655,9 +727,13 @@ def extract_tool_calls_from_response_text(
     if not tool_name_to_def:
         return []
 
-    matched_tool_calls: list[tuple[str, dict[str, Any]]] = []
+    matched_tool_calls = _extract_bracketed_tool_calls_from_response_text(
+        response_text=response_text,
+        tool_name_to_def=tool_name_to_def,
+    )
+
     # Find all JSON objects in the response text
-    json_objects = find_all_json_objects(response_text)
+    json_objects = [] if matched_tool_calls else find_all_json_objects(response_text)
     prev_json_obj: dict[str, Any] | None = None
     prev_tool_call: tuple[str, dict[str, Any]] | None = None
 
@@ -766,6 +842,12 @@ def _looks_like_malformed_tool_call_payload_from_defs(
     stripped = response_text.strip()
     if not stripped:
         return False
+
+    bracketed_tool_call_match = _BRACKETED_TOOL_CALL_RE.search(stripped)
+    if bracketed_tool_call_match:
+        tool_name = sanitize_string(bracketed_tool_call_match.group("name").strip())
+        if tool_name in tool_name_to_def:
+            return True
 
     tool_name_match = _TOOL_NAME_PATTERN.search(stripped)
     if not tool_name_match:
@@ -892,6 +974,44 @@ def _extract_xml_tool_calls_from_response_text(
             )
 
         matched_tool_calls.append((tool_name, tool_args))
+
+    return matched_tool_calls
+
+
+def _extract_bracketed_tool_calls_from_response_text(
+    response_text: str,
+    tool_name_to_def: dict[str, dict],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Extract Ollama/Qwen-style text tool calls.
+
+    Some local models render tool calls as text, for example:
+    ``[Tool Call] name=search_google_drive id=call_1 args={"query":"..."}``.
+    Bind the arguments to the named tool instead of letting generic JSON
+    matching guess among several tools that share a ``query`` parameter.
+    """
+    matched_tool_calls: list[tuple[str, dict[str, Any]]] = []
+
+    for tool_call_match in _BRACKETED_TOOL_CALL_RE.finditer(response_text):
+        tool_name = sanitize_string(tool_call_match.group("name").strip())
+        if tool_name not in tool_name_to_def:
+            continue
+
+        raw_args = sanitize_string(tool_call_match.group("args").strip(" \t\r\n,"))
+        tool_args = _parse_tool_args_to_dict(raw_args)
+        normalized_args = _normalize_and_validate_tool_args(
+            tool_name=tool_name,
+            arguments=tool_args,
+            tool_name_to_def=tool_name_to_def,
+        )
+        if normalized_args is None:
+            logger.warning(
+                "Skipping malformed bracketed tool call for %s with args=%s",
+                tool_name,
+                tool_args,
+            )
+            continue
+
+        matched_tool_calls.append((tool_name, normalized_args))
 
     return matched_tool_calls
 
@@ -1153,8 +1273,37 @@ _DEFAULT_HISTORY_MESSAGE_FORMATTER = _DefaultHistoryMessageFormatter()
 _OLLAMA_HISTORY_MESSAGE_FORMATTER = _OllamaHistoryMessageFormatter()
 
 
+def _ollama_model_supports_function_calling(llm_config: LLMConfig) -> bool:
+    """Check if litellm's model registry has this Ollama model registered
+    with ``supports_function_calling=True``.  When that flag is set, litellm
+    sends native tool calling payloads and the history should use structured
+    tool messages — not the text-based ``[Tool Call]`` fallback."""
+    model_name = f"{llm_config.model_provider}/{llm_config.model_name}"
+    # First check model_cost directly — this avoids network calls to Ollama
+    # that may fail inside containers where Ollama isn't reachable.
+    cost_entry = litellm.model_cost.get(model_name, {})
+    if cost_entry.get("supports_function_calling"):
+        return True
+    # Fallback to get_model_info which may query Ollama API.
+    try:
+        info = litellm.get_model_info(model_name)
+        return bool(info.get("supports_function_calling"))
+    except Exception:
+        return False
+
+
 def _get_history_message_formatter(llm_config: LLMConfig) -> _HistoryMessageFormatter:
     if llm_config.model_provider == LlmProviderNames.OLLAMA_CHAT:
+        if _ollama_model_supports_function_calling(llm_config):
+            logger.info(
+                "Using DEFAULT (structured) history formatter for %s/%s",
+                llm_config.model_provider, llm_config.model_name,
+            )
+            return _DEFAULT_HISTORY_MESSAGE_FORMATTER
+        logger.info(
+            "Using OLLAMA (text-based) history formatter for %s/%s",
+            llm_config.model_provider, llm_config.model_name,
+        )
         return _OLLAMA_HISTORY_MESSAGE_FORMATTER
 
     return _DEFAULT_HISTORY_MESSAGE_FORMATTER
@@ -1412,6 +1561,7 @@ def run_llm_step_pkt_generator(
     finish_reasons: set[str] = set()
     xml_tool_call_content_filter = _XmlToolCallContentFilter()
     json_tool_call_content_filter = _JsonToolCallContentFilter(tool_definitions)
+    ollama_tool_call_content_filter = _OllamaToolCallContentFilter()
 
     processor_state: Any = None
 
@@ -1616,6 +1766,9 @@ def run_llm_step_pkt_generator(
                 filtered_content = json_tool_call_content_filter.process(
                     filtered_content
                 )
+                filtered_content = ollama_tool_call_content_filter.process(
+                    filtered_content
+                )
                 if filtered_content:
                     yield from _emit_content_chunk(filtered_content)
 
@@ -1638,6 +1791,10 @@ def run_llm_step_pkt_generator(
             filtered_content_tail
         )
         filtered_content_tail += json_tool_call_content_filter.flush()
+        filtered_content_tail = ollama_tool_call_content_filter.process(
+            filtered_content_tail
+        )
+        filtered_content_tail += ollama_tool_call_content_filter.flush()
         if filtered_content_tail:
             yield from _emit_content_chunk(filtered_content_tail)
 

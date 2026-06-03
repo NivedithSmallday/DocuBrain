@@ -35,6 +35,16 @@ from docubrain.connectors.google_drive.doc_conversion import (
 )
 from docubrain.connectors.google_drive.doc_conversion import docubrain_document_id_from_drive_file
 from docubrain.connectors.google_drive.doc_conversion import PermissionSyncContext
+from docubrain.connectors.google_drive.incremental_delete import (
+    enqueue_drive_delete_cleanup,
+)
+from docubrain.server.metrics.incremental_sync_metrics import (
+    inc_restoration_event,
+    inc_tombstone_blocked_upsert,
+)
+from docubrain.connectors.google_drive.incremental_sync import DriveChangeAction
+from docubrain.connectors.google_drive.incremental_sync import GoogleDriveChangesClient
+from docubrain.connectors.google_drive.incremental_sync import classify_drive_change
 from docubrain.connectors.google_drive.file_retrieval import crawl_folders_for_files
 from docubrain.connectors.google_drive.file_retrieval import DriveFileFieldType
 from docubrain.connectors.google_drive.file_retrieval import get_all_files_for_oauth
@@ -79,6 +89,15 @@ from docubrain.connectors.models import EntityFailure
 from docubrain.connectors.models import HierarchyNode
 from docubrain.connectors.models import SlimDocument
 from docubrain.db.enums import HierarchyNodeType
+from docubrain.db.google_drive_sync import apply_drive_change_to_file_state
+from docubrain.db.google_drive_sync import get_google_drive_indexed_file_state
+from docubrain.db.google_drive_sync import get_google_drive_sync_state
+from docubrain.db.google_drive_sync import is_tombstone_newer_than_change
+from docubrain.db.google_drive_sync import mark_google_drive_sync_token_invalid
+from docubrain.db.google_drive_sync import previous_content_fingerprint_for_file
+from docubrain.db.google_drive_sync import upsert_google_drive_sync_state
+from docubrain.db.engine.sql_engine import get_session_with_current_tenant
+from shared_configs.contextvars import get_current_tenant_id
 from docubrain.indexing.indexing_heartbeat import IndexingHeartbeatInterface
 from docubrain.utils.logger import setup_logger
 from docubrain.utils.retry_wrapper import retry_builder
@@ -300,9 +319,21 @@ class GoogleDriveConnector(
         self.allow_images = False
 
         self.size_threshold = GOOGLE_DRIVE_CONNECTOR_SIZE_THRESHOLD
+        self._incremental_sync_cc_pair_id: int | None = None
 
     def set_allow_images(self, value: bool) -> None:
         self.allow_images = value
+
+    def set_incremental_sync_context(self, cc_pair_id: int) -> None:
+        """Attach the persistent sync identity for Drive changes feed usage.
+
+        The connector runner owns the ConnectorCredentialPair, so this is set
+        after instantiation. Keeping this as context instead of constructor
+        config avoids duplicating connector definitions or creating an MCP-only
+        indexing path.
+        """
+
+        self._incremental_sync_cc_pair_id = cc_pair_id
 
     @property
     def primary_admin_email(self) -> str:
@@ -1594,6 +1625,229 @@ class GoogleDriveConnector(
                 exception=e,
             )
 
+    def _load_from_drive_changes_if_ready(
+        self,
+        checkpoint: GoogleDriveCheckpoint,
+        include_permissions: bool,
+    ) -> Generator[
+        Document | ConnectorFailure | HierarchyNode, None, GoogleDriveCheckpoint | None
+    ]:
+        """Yield changed Drive files when a persistent changes token exists.
+
+        Returns None when the connector should use the existing full traversal
+        path. This keeps initial indexing and token-recovery behavior on the
+        mature connector implementation, while steady-state syncs use the Drive
+        Changes API and avoid full rescans.
+        """
+
+        if self._incremental_sync_cc_pair_id is None:
+            return None
+
+        with get_session_with_current_tenant() as db_session:
+            sync_state = get_google_drive_sync_state(
+                db_session=db_session,
+                cc_pair_id=self._incremental_sync_cc_pair_id,
+            )
+            if (
+                sync_state is None
+                or sync_state.full_sync_required
+                or sync_state.token_invalid
+                or sync_state.page_token is None
+            ):
+                return None
+            page_token = sync_state.page_token
+
+        logger.info(
+            "Google Drive incremental sync using changes feed for cc_pair=%s",
+            self._incremental_sync_cc_pair_id,
+        )
+
+        client = GoogleDriveChangesClient(
+            get_drive_service(self.creds, self.primary_admin_email)
+        )
+        changed_files: list[RetrievedDriveFile] = []
+        final_page_token: str | None = None
+        delete_count = 0
+        try:
+            for page in client.iter_change_pages(page_token=page_token):
+                final_page_token = page.new_start_page_token or page.next_page_token
+                for change in page.changes:
+                    file_id = change.get("fileId")
+                    if not isinstance(file_id, str) or not file_id:
+                        continue
+
+                    with get_session_with_current_tenant() as db_session:
+                        previous_fingerprint = previous_content_fingerprint_for_file(
+                            db_session=db_session,
+                            cc_pair_id=self._incremental_sync_cc_pair_id,
+                            file_id=file_id,
+                        )
+                    classification = classify_drive_change(
+                        change,
+                        previous_content_fingerprint=previous_fingerprint,
+                    )
+
+                    if classification.action is DriveChangeAction.SKIP:
+                        continue
+
+                    if classification.action is DriveChangeAction.DELETE:
+                        with get_session_with_current_tenant() as db_session:
+                            # Enqueue cleanup BEFORE marking the tombstone so
+                            # the file state still carries its document_id for
+                            # resolution.  The cleanup task is idempotent, so
+                            # duplicate DELETE events are safe.
+                            enqueue_drive_delete_cleanup(
+                                db_session=db_session,
+                                cc_pair_id=self._incremental_sync_cc_pair_id,
+                                file_id=classification.file_id,
+                                tenant_id=get_current_tenant_id(),
+                            )
+                            apply_drive_change_to_file_state(
+                                db_session=db_session,
+                                cc_pair_id=self._incremental_sync_cc_pair_id,
+                                classification=classification,
+                                document_id=None,
+                            )
+                            db_session.commit()
+                        delete_count += 1
+                        continue
+
+                    if classification.file is None:
+                        continue
+
+                    # Race-condition guard: if a concurrent worker already
+                    # processed a DELETE that is *newer* than this UPSERT,
+                    # skip indexing to avoid resurrecting a deleted document.
+                    # If the UPSERT is newer (e.g. file restored from trash),
+                    # allow it through so the file becomes visible again.
+                    with get_session_with_current_tenant() as db_session:
+                        tombstone_blocked = is_tombstone_newer_than_change(
+                            db_session=db_session,
+                            cc_pair_id=self._incremental_sync_cc_pair_id,
+                            file_id=classification.file_id,
+                            change_timestamp=classification.changed_at,
+                        )
+                        if tombstone_blocked:
+                            logger.info(
+                                "Skipping UPSERT for file_id=%s cc_pair=%d — "
+                                "tombstone is newer than change timestamp",
+                                classification.file_id,
+                                self._incremental_sync_cc_pair_id,
+                            )
+                            inc_tombstone_blocked_upsert()
+                            continue
+
+                        # Detect restoration: tombstone exists but UPSERT is
+                        # newer, so the file is being re-indexed after a
+                        # delete-then-restore cycle.
+                        file_state = get_google_drive_indexed_file_state(
+                            db_session=db_session,
+                            cc_pair_id=self._incremental_sync_cc_pair_id,
+                            file_id=classification.file_id,
+                        )
+                        if file_state and file_state.deleted_at is not None:
+                            logger.info(
+                                "Restoration detected for file_id=%s "
+                                "cc_pair=%d — clearing tombstone "
+                                "(deleted_at=%s, change_at=%s)",
+                                classification.file_id,
+                                self._incremental_sync_cc_pair_id,
+                                file_state.deleted_at,
+                                classification.changed_at,
+                            )
+                            inc_restoration_event()
+
+                    with get_session_with_current_tenant() as db_session:
+                        apply_drive_change_to_file_state(
+                            db_session=db_session,
+                            cc_pair_id=self._incremental_sync_cc_pair_id,
+                            classification=classification,
+                            document_id=docubrain_document_id_from_drive_file(
+                                classification.file
+                            ),
+                        )
+                        db_session.commit()
+
+                    changed_files.append(
+                        RetrievedDriveFile(
+                            completion_stage=DriveRetrievalStage.OAUTH_FILES,
+                            drive_file=classification.file,
+                            user_email=self.primary_admin_email,
+                            parent_id=(classification.file.get("parents") or [None])[
+                                0
+                            ],
+                        )
+                    )
+        except HttpError as e:
+            if e.resp.status in (400, 410):
+                with get_session_with_current_tenant() as db_session:
+                    sync_state = get_google_drive_sync_state(
+                        db_session=db_session,
+                        cc_pair_id=self._incremental_sync_cc_pair_id,
+                    )
+                    if sync_state is not None:
+                        mark_google_drive_sync_token_invalid(
+                            db_session=db_session,
+                            sync_state=sync_state,
+                            error_message=str(e),
+                        )
+                        db_session.commit()
+                logger.warning(
+                    "Google Drive changes token invalidated; falling back to full traversal."
+                )
+                return None
+            raise
+
+        if delete_count or changed_files:
+            logger.info(
+                "Google Drive incremental sync for cc_pair=%d: "
+                "%d deletes enqueued, %d files to index",
+                self._incremental_sync_cc_pair_id,
+                delete_count,
+                len(changed_files),
+            )
+
+        yield from self._convert_retrieved_files_to_documents(
+            iter(changed_files),
+            checkpoint,
+            include_permissions,
+        )
+
+        if final_page_token:
+            with get_session_with_current_tenant() as db_session:
+                upsert_google_drive_sync_state(
+                    db_session=db_session,
+                    cc_pair_id=self._incremental_sync_cc_pair_id,
+                    page_token=final_page_token,
+                    full_sync_required=False,
+                )
+                db_session.commit()
+
+        checkpoint.completion_stage = DriveRetrievalStage.DONE
+        checkpoint.has_more = False
+        return checkpoint
+
+    def _seed_incremental_sync_token_after_full_traversal(self) -> None:
+        if self._incremental_sync_cc_pair_id is None:
+            return
+
+        client = GoogleDriveChangesClient(
+            get_drive_service(self.creds, self.primary_admin_email)
+        )
+        token = client.get_start_page_token()
+        with get_session_with_current_tenant() as db_session:
+            upsert_google_drive_sync_state(
+                db_session=db_session,
+                cc_pair_id=self._incremental_sync_cc_pair_id,
+                page_token=token,
+                full_sync_required=False,
+            )
+            db_session.commit()
+        logger.info(
+            "Seeded Google Drive incremental changes token for cc_pair=%s",
+            self._incremental_sync_cc_pair_id,
+        )
+
     def _load_from_checkpoint(
         self,
         start: SecondsSinceUnixEpoch,
@@ -1616,6 +1870,13 @@ class GoogleDriveConnector(
         checkpoint = copy.deepcopy(checkpoint)
         self._retrieved_folder_and_drive_ids = checkpoint.retrieved_folder_and_drive_ids
         try:
+            incremental_checkpoint = yield from self._load_from_drive_changes_if_ready(
+                checkpoint=checkpoint,
+                include_permissions=include_permissions,
+            )
+            if incremental_checkpoint is not None:
+                return incremental_checkpoint
+
             field_type = (
                 DriveFileFieldType.WITH_PERMISSIONS
                 if include_permissions or self.exclude_domain_link_only
@@ -1640,6 +1901,7 @@ class GoogleDriveConnector(
             f"num drive files retrieved: {len(checkpoint.all_retrieved_file_ids)}"
         )
         if checkpoint.completion_stage == DriveRetrievalStage.DONE:
+            self._seed_incremental_sync_token_after_full_traversal()
             checkpoint.has_more = False
         return checkpoint
 

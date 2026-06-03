@@ -30,7 +30,10 @@ from docubrain.chat.prompt_utils import (
     get_default_base_system_prompt,
 )
 from docubrain.configs.app_configs import INTEGRATION_TESTS_MODE
+from docubrain.configs.chat_configs import ENABLE_RETRIEVAL_TRACING
+from docubrain.configs.chat_configs import SHOW_CITATIONS
 from docubrain.configs.constants import DocumentSource
+from docubrain.context.search.retrieval_trace import record_query_trace
 from docubrain.configs.constants import MessageType
 from docubrain.context.search.models import SearchDoc
 from docubrain.context.search.models import SearchDocsResponse
@@ -47,6 +50,8 @@ from docubrain.llm.utils import is_true_openai_model
 from docubrain.prompts.chat_prompts import IMAGE_GEN_REMINDER
 from docubrain.prompts.chat_prompts import OPEN_URL_REMINDER
 from docubrain.server.query_and_chat.placement import Placement
+from docubrain.server.query_and_chat.streaming_models import AgentResponseDelta
+from docubrain.server.query_and_chat.streaming_models import AgentResponseStart
 from docubrain.server.query_and_chat.streaming_models import OverallStop
 from docubrain.server.query_and_chat.streaming_models import Packet
 from docubrain.server.query_and_chat.streaming_models import ToolCallDebug
@@ -66,6 +71,19 @@ from docubrain.tools.models import ToolResponse
 from docubrain.tools.tool_implementations.memory.models import MemoryToolResponse
 from docubrain.tools.tool_implementations.search.search_tool import SearchTool
 from docubrain.tools.tool_runner import run_tool_calls
+from docubrain.chat.retrieval_router import (
+    classify_and_route,
+    build_fallback_decision,
+    tool_responses_are_empty,
+    query_has_email_intent,
+    query_has_drive_intent,
+    GMAIL_MCP_TOOL_NAMES,
+    DRIVE_MCP_TOOL_NAMES,
+)
+from docubrain.chat.retrieval_router_models import (
+    RoutingDecision,
+    RoutingStrategy,
+)
 from docubrain.tracing.framework.create import trace
 from docubrain.utils.logger import setup_logger
 from shared_configs.contextvars import get_current_tenant_id
@@ -89,6 +107,12 @@ _DOC_INTENT_TERMS = {
     "folders",
     "drive",
     "google drive",
+    "mail",
+    "mails",
+    "email",
+    "emails",
+    "gmail",
+    "inbox",
     "github",
     "repo",
     "repository",
@@ -107,6 +131,16 @@ _DOC_INTENT_TERMS = {
     "ingested",
     "knowledge base",
     "kb",
+    "mail",
+    "mails",
+    "email",
+    "emails",
+    "inbox",
+    "received",
+    "sent",
+    "gmail",
+    "drive",
+    "google drive",
 }
 
 
@@ -150,14 +184,57 @@ def _should_skip_tools_for_initial_message(
     if any(term in normalized_message for term in _DOC_INTENT_TERMS):
         return False
 
+    # Only greetings / pure conversational filler may bypass retrieval. Short
+    # factual queries ("PTO policy", "maternity leave", "Q3 revenue") must keep
+    # tools available so the LLM can retrieve before answering. The previous
+    # word_count<=3 heuristic incorrectly suppressed retrieval for these and was
+    # a primary cause of "indexed but unanswered" failures.
     if _CASUAL_NO_TOOL_RE.fullmatch(normalized_message):
         return True
 
-    word_count = len(normalized_message.split())
-    if word_count <= 3 and re.fullmatch(r"[\w\s'.?!,-]+", normalized_message):
-        return True
-
     return False
+
+
+def _build_missing_workspace_tool_message(
+    query: str,
+    available_tool_names: set[str],
+    has_internal_search: bool,
+) -> str | None:
+    """Return a system hint when the query needs a Google Workspace tool that
+    isn't available to this assistant, else None.
+
+    Prevents the model from confabulating a "privacy/security" refusal when the
+    real cause is that the Gmail/Drive action simply isn't attached (or its
+    connection failed to load). Gmail is never covered by internal_search, so a
+    missing Gmail tool is always a hard miss; a missing Drive tool only matters
+    when there is also no indexed (internal_search) fallback.
+    """
+    has_gmail = bool(available_tool_names & GMAIL_MCP_TOOL_NAMES)
+    has_drive = bool(available_tool_names & DRIVE_MCP_TOOL_NAMES)
+
+    needs_email = query_has_email_intent(query) and not has_gmail
+    needs_drive = (
+        query_has_drive_intent(query) and not has_drive and not has_internal_search
+    )
+
+    missing: list[str] = []
+    if needs_email:
+        missing.append("Gmail")
+    if needs_drive:
+        missing.append("Google Drive")
+    if not missing:
+        return None
+
+    which = " and ".join(missing)
+    return (
+        f"SYSTEM: The user's request requires the {which} action, but it is NOT "
+        f"available to you in this conversation. Do NOT refuse for privacy or "
+        f"security reasons and do NOT pretend you accessed it. Tell the user "
+        f"honestly that the {which} action is not currently enabled for this "
+        f"assistant, and that they can enable it in Settings → Assistants → "
+        f"Actions (or reconnect Google under Settings → Connectors). Keep the "
+        f"reply short and actionable."
+    )
 
 
 class EmptyLLMResponseError(RuntimeError):
@@ -221,6 +298,235 @@ def _build_empty_llm_response_error(
             "completed. No text or tool calls were received from the upstream "
             "provider."
         ),
+    )
+
+
+def _parse_nested_json(value: Any) -> Any:
+    """Parse JSON strings nested inside custom MCP tool responses."""
+    parsed = value
+    for _ in range(3):
+        if not isinstance(parsed, str):
+            break
+        try:
+            parsed = json.loads(parsed)
+        except json.JSONDecodeError:
+            break
+    return parsed
+
+
+def _extract_custom_tool_payload(tool_response: ToolResponse) -> tuple[str | None, Any]:
+    if tool_response.tool_call:
+        tool_name = tool_response.tool_call.tool_name
+    elif isinstance(tool_response.rich_response, CustomToolCallSummary):
+        tool_name = tool_response.rich_response.tool_name
+    else:
+        tool_name = None
+
+    if isinstance(tool_response.rich_response, CustomToolCallSummary):
+        payload = tool_response.rich_response.tool_result
+    else:
+        payload = tool_response.llm_facing_response
+
+    payload = _parse_nested_json(payload)
+    if isinstance(payload, dict) and "tool_result" in payload:
+        payload = _parse_nested_json(payload["tool_result"])
+
+    return tool_name, payload
+
+
+def _build_recent_email_fallback_answer(
+    tool_name: str | None,
+    payload: Any,
+) -> str | None:
+    if tool_name not in {"get_recent_emails", "search_gmail", "search_emails"}:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    if error := payload.get("error"):
+        return (
+            "I could not retrieve your recent emails.\n\n"
+            f"Reason: {error}\n\n"
+            "The email MCP tool returned this error directly."
+        )
+
+    results = payload.get("results") or payload.get("messages") or payload.get("emails")
+    if not results:
+        return "No recent emails were found in your inbox."
+
+    lines = ["Here are your recent emails:"]
+    for index, item in enumerate(results[:10], start=1):
+        if not isinstance(item, dict):
+            continue
+        subject = (
+            item.get("subject")
+            or item.get("title")
+            or item.get("semantic_identifier")
+            or "(no subject)"
+        )
+        sender = item.get("sender") or item.get("from") or item.get("from_email")
+        received_at = item.get("received_at") or item.get("date") or item.get("timestamp")
+        snippet = item.get("snippet") or item.get("summary") or item.get("content")
+
+        detail_parts = []
+        if sender:
+            detail_parts.append(f"from {sender}")
+        if received_at:
+            detail_parts.append(str(received_at))
+
+        detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
+        lines.append(f"{index}. {subject}{detail}")
+        if snippet:
+            lines.append(f"   {str(snippet)[:220]}")
+
+    lines.append(
+        "\nNote: the selected model returned an empty final answer after the "
+        "mail tool completed, so I used the tool result directly."
+    )
+    return "\n".join(lines)
+
+
+_DRIVE_TOOL_NAMES = {
+    "list_recent_files",
+    "search_drive_files",
+    "search_google_drive",
+    "search_drive_content",
+    "list_folder_contents",
+    "list_shared_drives",
+}
+
+
+def _build_drive_fallback_answer(
+    tool_name: str | None,
+    payload: Any,
+) -> str | None:
+    if tool_name not in _DRIVE_TOOL_NAMES:
+        logger.debug(f"Drive fallback: tool_name '{tool_name}' not in DRIVE_TOOL_NAMES")
+        return None
+
+    if not isinstance(payload, dict):
+        logger.info(f"Drive fallback: payload is not dict, type={type(payload).__name__}")
+        return None
+    logger.info(f"Drive fallback: payload keys={list(payload.keys())[:10]}")
+
+    if error := payload.get("error"):
+        return f"The Google Drive tool ran, but it returned an error: {error}"
+
+    results = payload.get("results") or payload.get("files")
+    if not isinstance(results, list):
+        return None
+
+    if not results:
+        return "I checked Google Drive and did not find any files matching the request."
+
+    lines = ["Here are the Google Drive files found:", ""]
+    for index, result in enumerate(results[:15], start=1):
+        if not isinstance(result, dict):
+            continue
+        title = str(
+            result.get("title")
+            or result.get("name")
+            or result.get("fileName")
+            or "Untitled"
+        )
+        mime_type = str(result.get("mimeType") or result.get("type") or "").strip()
+        modified = str(
+            result.get("modifiedTime")
+            or result.get("timestamp")
+            or result.get("updated_at")
+            or ""
+        ).strip()
+        link = str(
+            result.get("link")
+            or result.get("webViewLink")
+            or result.get("url")
+            or ""
+        ).strip()
+
+        metadata_parts: list[str] = []
+        if mime_type:
+            metadata_parts.append(mime_type.split(".")[-1])
+        if modified:
+            metadata_parts.append(modified)
+        metadata = ", ".join(metadata_parts)
+        prefix = f"{index}. {title}"
+        lines.append(f"{prefix} ({metadata})" if metadata else prefix)
+        if link:
+            lines.append(f"   Link: {link}")
+
+    lines.append(
+        "\nNote: the selected model returned an empty final answer after the "
+        "Drive tool completed, so I used the tool result directly."
+    )
+    return "\n".join(lines)
+
+
+_AUTH_ERROR_SIGNALS = frozenset({
+    "authentication", "credential", "expired", "revoked",
+    "401", "unauthorized", "reconnect", "invalid_grant",
+})
+
+
+def _detect_auth_error_in_tool_responses(
+    tool_responses: list[ToolResponse],
+) -> str | None:
+    """If any tool response indicates a Google auth error, return a user-facing message.
+
+    Returns None if no auth error is detected.
+    """
+    for tr in tool_responses:
+        _, payload = _extract_custom_tool_payload(tr)
+        if not isinstance(payload, dict):
+            continue
+
+        if payload.get("auth_error"):
+            return payload.get("user_action") or (
+                "Your Google credentials have expired. "
+                "Please reconnect in Settings → Connectors → Google Drive."
+            )
+
+        error_msg = str(payload.get("error", "")).lower()
+        if error_msg and any(kw in error_msg for kw in _AUTH_ERROR_SIGNALS):
+            return (
+                "Your Google credentials have expired or been revoked. "
+                "Please go to Settings → Connectors → Google Drive and "
+                "reconnect your Google account. "
+                "Retrying this request will not work until you re-authenticate."
+            )
+
+    return None
+
+
+def _build_tool_response_fallback_answer(
+    tool_responses: list[ToolResponse],
+) -> str | None:
+    if not tool_responses:
+        return None
+
+    # Check for auth errors first — give a clear, actionable message
+    if auth_msg := _detect_auth_error_in_tool_responses(tool_responses):
+        return auth_msg
+
+    tool_name, payload = _extract_custom_tool_payload(tool_responses[-1])
+    if email_answer := _build_recent_email_fallback_answer(tool_name, payload):
+        return email_answer
+
+    if drive_answer := _build_drive_fallback_answer(tool_name, payload):
+        return drive_answer
+
+    if isinstance(payload, dict) and payload.get("error"):
+        return f"The tool call failed: {payload['error']}"
+
+    if isinstance(payload, (dict, list)):
+        rendered_payload = json.dumps(payload, ensure_ascii=False, indent=2)
+    else:
+        rendered_payload = str(payload)
+
+    return (
+        "The tool completed successfully, but the selected model returned an "
+        "empty final answer. Here is the tool result:\n\n"
+        f"{rendered_payload[:2000]}"
     )
 
 
@@ -774,9 +1080,14 @@ def run_llm_loop(
         # Initialize citation processor for handling citations dynamically
         # When include_citations is True, use HYPERLINK mode to format citations as [[1]](url)
         # When include_citations is False, use REMOVE mode to strip citations from output
+        # The global SHOW_CITATIONS setting can force citation-free answers
+        # regardless of the per-request flag (REMOVE mode + no citation guidance).
+        effective_include_citations = include_citations and SHOW_CITATIONS
         citation_processor = DynamicCitationProcessor(
             citation_mode=(
-                CitationMode.HYPERLINK if include_citations else CitationMode.REMOVE
+                CitationMode.HYPERLINK
+                if effective_include_citations
+                else CitationMode.REMOVE
             )
         )
 
@@ -808,14 +1119,20 @@ def run_llm_loop(
         # One future workaround is to include the images as separate user messages with citation information and process those.
         always_cite_documents: bool = bool(
             context_files.use_as_search_filter or context_files.file_texts
-        )
+        ) and effective_include_citations
         should_cite_documents: bool = False
         ran_image_gen: bool = False
         just_ran_web_search: bool = False
         has_called_search_tool: bool = False
+        # Phase-4 KPI tracking: did this turn invoke ANY retrieval tool
+        # (internal_search or a Drive/Gmail MCP tool), and which ones.
+        retrieval_invoked: bool = False
+        invoked_retrieval_tools: set[str] = set()
         code_interpreter_file_generated: bool = False
         fallback_extraction_attempted: bool = False
         citation_mapping: dict[int, str] = {}  # Maps citation_num -> document_id/URL
+        last_successful_tool_responses: list[ToolResponse] = []
+        auth_error_injected: bool = False
 
         # Fetch this in a short-lived session so the long-running stream loop does
         # not pin a connection just to keep read state alive.
@@ -831,6 +1148,45 @@ def run_llm_loop(
             custom_agent_prompt=custom_agent_prompt,
         )
         retry_without_tools_after_malformed_payload = False
+
+        # --- Retrieval Router: classify query before entering the loop ---
+        routing_decision: RoutingDecision | None = None
+        if not skip_tools_for_initial_message and tools:
+            latest_query = _get_latest_user_message_text(simple_chat_history)
+            if latest_query:
+                available_tool_names = {t.name for t in tools}
+                _google_ws_names = GMAIL_MCP_TOOL_NAMES | DRIVE_MCP_TOOL_NAMES
+                has_google_workspace = bool(available_tool_names & _google_ws_names)
+                has_internal_search = any(
+                    isinstance(t, SearchTool) for t in tools
+                )
+                routing_decision = classify_and_route(
+                    query=latest_query,
+                    available_tool_names=available_tool_names,
+                    has_google_workspace=has_google_workspace,
+                    has_internal_search=has_internal_search,
+                )
+
+                # --- Honest missing-tool guard (anti-confabulation) ---
+                # If the user clearly wants Gmail/Drive but the corresponding tool
+                # is not attached to this assistant, the model otherwise tends to
+                # invent a "privacy" refusal. Inject a system note so it answers
+                # honestly and tells the user how to enable the action instead.
+                missing_tool_msg = _build_missing_workspace_tool_message(
+                    latest_query, available_tool_names, has_internal_search
+                )
+                if missing_tool_msg:
+                    logger.info(
+                        "llm_loop: workspace tool missing for query; injecting honest-failure hint"
+                    )
+                    simple_chat_history.append(
+                        ChatMessageSimple(
+                            message=missing_tool_msg,
+                            token_count=token_counter(missing_tool_msg),
+                            message_type=MessageType.SYSTEM,
+                            image_files=None,
+                        )
+                    )
 
         reasoning_cycles = 0
         for llm_cycle_count in range(MAX_LLM_CYCLES):
@@ -854,6 +1210,29 @@ def run_llm_loop(
                 tool_choice = ToolChoiceOptions.NONE
                 final_tools = []
                 retry_without_tools_after_malformed_payload = False
+            elif (
+                llm_cycle_count == 0
+                and routing_decision is not None
+                and routing_decision.confidence >= 0.7
+                and routing_decision.strategy != RoutingStrategy.LLM_DECIDES
+            ):
+                # High-confidence routing: prefer suggested tools, deprioritize others
+                tool_choice = ToolChoiceOptions.AUTO
+                blocked = set(routing_decision.blocked_tool_names)
+                preferred = set(routing_decision.preferred_tool_names)
+                if preferred:
+                    # Put preferred tools first, keep others (except blocked)
+                    preferred_tools = [t for t in tools if t.name in preferred]
+                    other_tools = [
+                        t for t in tools
+                        if t.name not in preferred and t.name not in blocked
+                    ]
+                    final_tools = preferred_tools + other_tools
+                else:
+                    final_tools = [t for t in tools if t.name not in blocked]
+                # Safety: never leave tools empty
+                if not final_tools:
+                    final_tools = tools
             else:
                 tool_choice = ToolChoiceOptions.AUTO
                 final_tools = tools
@@ -892,6 +1271,11 @@ def run_llm_loop(
                         tools=tools,
                         should_cite_documents=should_cite_documents
                         or always_cite_documents,
+                        routing_hint=(
+                            routing_decision
+                            if llm_cycle_count == 0
+                            else None
+                        ),
                     )
                     system_prompt = ChatMessageSimple(
                         message=system_prompt_str,
@@ -965,6 +1349,13 @@ def run_llm_loop(
             # This calls the LLM, yields packets (reasoning, answers, etc.) and returns the result
             # It also pre-processes the tool calls in preparation for running them
             tool_defs = [tool.tool_definition() for tool in final_tools]
+            if llm_cycle_count == 0:
+                logger.info(
+                    f"run_llm_loop cycle 0: {len(tools)} total tools, "
+                    f"{len(final_tools)} final_tools, {len(tool_defs)} tool_defs, "
+                    f"skip_tools={skip_tools_for_initial_message}, "
+                    f"tool_choice={tool_choice}"
+                )
 
             # Calculate total processing time from loop start until now
             # This measures how long the user waits before the answer starts streaming
@@ -1081,6 +1472,8 @@ def run_llm_loop(
                 inject_memories_in_prompt=inject_memories_in_prompt,
             )
             tool_responses = parallel_tool_call_results.tool_responses
+            if tool_responses:
+                last_successful_tool_responses = tool_responses
             citation_mapping = parallel_tool_call_results.updated_citation_mapping
 
             # Failure case, give something reasonable to the LLM to try again
@@ -1102,6 +1495,15 @@ def run_llm_loop(
                 # Track if search tool was called (for skipping query expansion on subsequent calls)
                 if tool_call.tool_name == SearchTool.NAME:
                     has_called_search_tool = True
+
+                # Phase-4 KPI: record any retrieval-class tool invocation.
+                if (
+                    tool_call.tool_name == SearchTool.NAME
+                    or tool_call.tool_name in GMAIL_MCP_TOOL_NAMES
+                    or tool_call.tool_name in DRIVE_MCP_TOOL_NAMES
+                ):
+                    retrieval_invoked = True
+                    invoked_retrieval_tools.add(tool_call.tool_name)
 
                 # Track if code interpreter generated files with download links
                 if (
@@ -1280,6 +1682,46 @@ def run_llm_loop(
                     )
                     simple_chat_history.append(tool_response_msg)
 
+            # --- Auth error: stop retrying, tell user to re-authenticate ---
+            if tool_responses and not auth_error_injected:
+                auth_error_msg = _detect_auth_error_in_tool_responses(tool_responses)
+                if auth_error_msg:
+                    logger.warning(
+                        "LLM loop: Google auth error detected, injecting re-auth hint"
+                    )
+                    auth_error_injected = True
+                    auth_hint = ChatMessageSimple(
+                        message=(
+                            "SYSTEM: The Google Workspace tool returned an authentication error. "
+                            "Do NOT retry the same tool call — it will fail again. "
+                            "Instead, tell the user clearly: " + auth_error_msg
+                        ),
+                        token_count=token_counter(auth_error_msg) + 30,
+                        message_type=MessageType.SYSTEM,
+                        image_files=None,
+                    )
+                    simple_chat_history.append(auth_hint)
+                    # Let the LLM generate a final answer with the auth hint
+                    continue
+
+            # --- Retrieval Router: fallback if primary returned empty ---
+            if (
+                routing_decision is not None
+                and routing_decision.strategy == RoutingStrategy.FALLBACK_CHAIN
+                and routing_decision.fallback_targets
+                and tool_responses
+                and tool_responses_are_empty(tool_responses)
+            ):
+                fallback = build_fallback_decision(routing_decision)
+                if fallback is not None:
+                    logger.info(
+                        "RetrievalRouter: primary returned empty, switching to fallback targets=%s",
+                        [t.value for t in fallback.primary_targets],
+                    )
+                    routing_decision = fallback
+                    # Don't break — continue to next cycle with updated routing
+                    continue
+
             # If no tool calls, then it must have answered, wrap up
             if not llm_step_result.tool_calls or len(llm_step_result.tool_calls) == 0:
                 break
@@ -1291,19 +1733,55 @@ def run_llm_loop(
             ):
                 ran_image_gen = True
 
-            if llm_step_result.tool_calls and any(
-                tool.tool_name in CITEABLE_TOOLS_NAMES
-                for tool in llm_step_result.tool_calls
+            if (
+                effective_include_citations
+                and llm_step_result.tool_calls
+                and any(
+                    tool.tool_name in CITEABLE_TOOLS_NAMES
+                    for tool in llm_step_result.tool_calls
+                )
             ):
                 # As long as 1 tool with citeable documents is called at any point, we ask the LLM to try to cite
                 should_cite_documents = True
 
+        logger.info(
+            f"Loop ended: answer={'yes' if llm_step_result.answer else 'no'}, "
+            f"tool_calls={len(llm_step_result.tool_calls) if llm_step_result.tool_calls else 0}, "
+            f"last_tool_responses={len(last_successful_tool_responses)}"
+        )
         if not llm_step_result.answer and not llm_step_result.tool_calls:
-            raise _build_empty_llm_response_error(
-                llm=llm,
-                llm_step_result=llm_step_result,
-                tool_choice=tool_choice,
+            logger.info("Entering fallback path for empty answer")
+            fallback_answer = _build_tool_response_fallback_answer(
+                last_successful_tool_responses
             )
+            if fallback_answer:
+                llm_step_result.answer = fallback_answer
+                state_container.set_answer_tokens(fallback_answer)
+                fallback_placement = Placement(
+                    turn_index=llm_cycle_count + reasoning_cycles
+                )
+                emitter.emit(
+                    Packet(
+                        placement=fallback_placement,
+                        obj=AgentResponseStart(
+                            final_documents=gathered_documents,
+                            pre_answer_processing_seconds=time.monotonic()
+                            - loop_start_time,
+                        ),
+                    )
+                )
+                emitter.emit(
+                    Packet(
+                        placement=fallback_placement,
+                        obj=AgentResponseDelta(content=fallback_answer),
+                    )
+                )
+            else:
+                raise _build_empty_llm_response_error(
+                    llm=llm,
+                    llm_step_result=llm_step_result,
+                    tool_choice=tool_choice,
+                )
 
         if not llm_step_result.answer:
             raise RuntimeError(
@@ -1311,6 +1789,21 @@ def run_llm_loop(
                 "Typically this indicates invalid tool-call output, a model/provider mismatch, "
                 "or serving API misconfiguration."
             )
+
+        # Phase-4 KPI: one authoritative per-turn retrieval trace (written even
+        # when retrieval never fired) so invocation rate is measurable in prod.
+        if ENABLE_RETRIEVAL_TRACING:
+            latest_query = _get_latest_user_message_text(simple_chat_history)
+            if latest_query:
+                record_query_trace(
+                    query=latest_query,
+                    search_invoked=retrieval_invoked,
+                    retrieval_tool_names=sorted(invoked_retrieval_tools),
+                    answered=bool(llm_step_result.answer),
+                    final_answer=llm_step_result.answer,
+                    latency_ms=(time.monotonic() - loop_start_time) * 1000.0,
+                    chat_session_id=chat_session_id,
+                )
 
         emitter.emit(
             Packet(

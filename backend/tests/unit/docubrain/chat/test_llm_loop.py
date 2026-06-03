@@ -1,10 +1,12 @@
 """Tests for llm_loop.py, including history construction and empty-response paths."""
 
+import json
 from unittest.mock import Mock
 
 import pytest
 
 from docubrain.chat.llm_loop import _build_empty_llm_response_error
+from docubrain.chat.llm_loop import _build_tool_response_fallback_answer
 from docubrain.chat.llm_loop import _try_fallback_tool_extraction
 from docubrain.chat.llm_loop import construct_message_history
 from docubrain.chat.llm_loop import EmptyLLMResponseError
@@ -20,7 +22,9 @@ from docubrain.file_store.models import ChatFileType
 from docubrain.llm.interfaces import LLMConfig
 from docubrain.llm.interfaces import ToolChoiceOptions
 from docubrain.server.query_and_chat.placement import Placement
+from docubrain.tools.models import CustomToolCallSummary
 from docubrain.tools.models import ToolCallKickoff
+from docubrain.tools.models import ToolResponse
 
 
 def create_message(
@@ -99,6 +103,40 @@ def create_context_files(
         file_metadata=file_metadata,
         uncapped_token_count=num_files * tokens_per_file,
     )
+
+
+class TestToolResponseFallbackAnswer:
+    def test_formats_recent_email_results_when_model_returns_empty_final_answer(
+        self,
+    ) -> None:
+        tool_response = ToolResponse(
+            rich_response=CustomToolCallSummary(
+                tool_name="get_recent_emails",
+                response_type="json",
+                tool_result={
+                    "tool_result": json.dumps(
+                        {
+                            "provider": "gmail",
+                            "results": [
+                                {
+                                    "subject": "Welcome",
+                                    "sender": "team@example.com",
+                                    "snippet": "Hello from the inbox",
+                                }
+                            ],
+                        }
+                    )
+                },
+            ),
+            llm_facing_response="{}",
+        )
+
+        answer = _build_tool_response_fallback_answer([tool_response])
+
+        assert answer is not None
+        assert "Welcome" in answer
+        assert "team@example.com" in answer
+        assert "empty final answer" in answer
 
 
 class TestConstructMessageHistory:

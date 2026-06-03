@@ -86,6 +86,12 @@ from docubrain.server.features.input_prompt.api import (
 )
 from docubrain.server.features.mcp.api import admin_router as mcp_admin_router
 from docubrain.server.features.mcp.api import router as mcp_router
+from docubrain.server.features.mcp.google_workspace_api import (
+    router as google_workspace_mcp_api_router,
+)
+from docubrain.server.features.mcp.google_workspace_oauth import (
+    router as google_workspace_oauth_router,
+)
 from docubrain.server.features.notifications.api import router as notification_router
 from docubrain.server.features.oauth_config.api import (
     admin_router as admin_oauth_config_router,
@@ -502,6 +508,12 @@ def get_application(lifespan_override: Lifespan | None = None) -> FastAPI:
     include_router_with_global_prefix_prepended(application, federated_router)
     include_router_with_global_prefix_prepended(application, mcp_router)
     include_router_with_global_prefix_prepended(application, mcp_admin_router)
+    include_router_with_global_prefix_prepended(
+        application, google_workspace_oauth_router
+    )
+    include_router_with_global_prefix_prepended(
+        application, google_workspace_mcp_api_router
+    )
 
     include_router_with_global_prefix_prepended(application, pat_router)
 
