@@ -6,10 +6,12 @@ import pytest
 
 from docubrain.chat.llm_step import _extract_tool_call_kickoffs
 from docubrain.chat.llm_step import _increment_turns
+from docubrain.chat.llm_step import _normalize_and_validate_tool_args
 from docubrain.chat.llm_step import _parse_tool_args_to_dict
 from docubrain.chat.llm_step import _resolve_tool_arguments
 from docubrain.chat.llm_step import _XmlToolCallContentFilter
 from docubrain.chat.llm_step import extract_tool_calls_from_response_text
+from docubrain.chat.llm_step import looks_like_malformed_tool_call_payload
 from docubrain.chat.llm_step import translate_history_to_llm_format
 from docubrain.chat.models import ChatMessageSimple
 from docubrain.chat.models import ToolCallSimple
@@ -158,6 +160,27 @@ class TestParseToolArgsToDict:
         assert result == {"query": "hello 👋 世界"}
 
 
+class TestNormalizeToolArgs:
+    def test_coerces_integer_string_for_tool_args(self) -> None:
+        result = _normalize_and_validate_tool_args(
+            "get_recent_emails",
+            {"max_results": "10"},
+            {
+                "get_recent_emails": {
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "max_results": {"type": "integer"},
+                        },
+                        "required": ["max_results"],
+                    }
+                }
+            },
+        )
+
+        assert result == {"max_results": 10}
+
+
 class TestExtractToolCallsFromResponseText:
     def _tool_defs(self) -> list[dict]:
         return [
@@ -247,6 +270,69 @@ class TestExtractToolCallsFromResponseText:
         assert tool_calls[0].tool_args == {
             "queries": ["DocuBrain documentation", "DocuBrain docs", "DocuBrain platform"]
         }
+
+    def test_extracts_bracketed_tool_call_using_named_tool_schema(self) -> None:
+        response_text = (
+            '[Tool Call] name=search_google_drive id=call_123 '
+            'args={"query":"SD Transition Plan- Mrutyunjaya","limit":5}'
+        )
+        tool_defs = [
+            *self._tool_defs(),
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_google_drive",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "limit": {"type": "integer"},
+                        },
+                        "required": ["query"],
+                    },
+                },
+            },
+        ]
+
+        tool_calls = extract_tool_calls_from_response_text(
+            response_text=response_text,
+            tool_definitions=tool_defs,
+            placement=self._placement(),
+        )
+
+        assert len(tool_calls) == 1
+        assert tool_calls[0].tool_name == "search_google_drive"
+        assert tool_calls[0].tool_args == {
+            "query": "SD Transition Plan- Mrutyunjaya",
+            "limit": 5,
+        }
+
+    def test_ignores_bracketed_tool_call_with_missing_required_args(self) -> None:
+        response_text = "[Tool Call] name=search_google_drive args= ,"
+        tool_defs = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_google_drive",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                        },
+                        "required": ["query"],
+                    },
+                },
+            }
+        ]
+
+        tool_calls = extract_tool_calls_from_response_text(
+            response_text=response_text,
+            tool_definitions=tool_defs,
+            placement=self._placement(),
+        )
+
+        assert tool_calls == []
+        assert looks_like_malformed_tool_call_payload(response_text, tool_defs) is True
 
     def test_ignores_unknown_tool_in_xml_style_invoke(self) -> None:
         response_text = """
