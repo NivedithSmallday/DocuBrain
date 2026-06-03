@@ -3,6 +3,7 @@
 import { useState, useCallback, useMemo, useEffect } from "react";
 import { KeyedMutator } from "swr";
 import MCPActionCard from "@/sections/actions/MCPActionCard";
+import GoogleWorkspaceConnect from "@/sections/actions/GoogleWorkspaceConnect";
 import AdminListHeader from "@/sections/admin/AdminListHeader";
 import ActionCardSkeleton from "@/sections/actions/skeleton/ActionCardSkeleton";
 import { getActionIcon } from "@/lib/tools/mcpUtils";
@@ -28,6 +29,8 @@ import {
 import { useSearchParams } from "next/navigation";
 import { useRouter } from "next/navigation";
 import useMcpServers from "@/hooks/useMcpServers";
+
+const GOOGLE_WORKSPACE_MCP_SERVER_NAME = "Google Workspace MCP";
 
 export default function MCPPageContent() {
   // Data fetching
@@ -64,6 +67,25 @@ export default function MCPPageContent() {
   useEffect(() => {
     const serverId = searchParams.get("server_id");
     const triggerFetch = searchParams.get("trigger_fetch");
+    const googleConnected = searchParams.get("google_connected");
+    const googleError = searchParams.get("google_error");
+
+    if (googleConnected === "true") {
+      toast.success("Google Workspace connected");
+      void mutateMcpServers();
+      router.replace("/admin/actions/mcp");
+      return;
+    }
+
+    if (googleError) {
+      toast.error(
+        googleError === "authorization_failed"
+          ? "Authorization failed"
+          : "Google authorization could not be completed"
+      );
+      router.replace("/admin/actions/mcp");
+      return;
+    }
 
     // Only process if we have a server_id and trigger_fetch flag
     if (
@@ -103,7 +125,7 @@ export default function MCPPageContent() {
         }
       };
 
-      handleFetchingTools();
+      void handleFetchingTools();
     }
   }, [
     searchParams,
@@ -464,10 +486,14 @@ export default function MCPPageContent() {
 
   // Filter servers based on search query
   const filteredServers = useMemo(() => {
-    if (!searchQuery.trim()) return mcpServers;
+    const visibleServers = mcpServers.filter(
+      (server) => server.name !== GOOGLE_WORKSPACE_MCP_SERVER_NAME
+    );
+
+    if (!searchQuery.trim()) return visibleServers;
 
     const query = searchQuery.toLowerCase();
-    return mcpServers.filter(
+    return visibleServers.filter(
       (server) =>
         server.name.toLowerCase().includes(query) ||
         server.description?.toLowerCase().includes(query) ||
@@ -488,7 +514,7 @@ export default function MCPPageContent() {
 
       <div className="flex-shrink-0 mb-4">
         <AdminListHeader
-          hasItems={isLoading || mcpServers.length > 0}
+          hasItems={true}
           searchQuery={searchQuery}
           onSearchQueryChange={setSearchQuery}
           onAction={handleAddServer}
@@ -499,6 +525,11 @@ export default function MCPPageContent() {
 
       <div className="flex-1 overflow-y-auto min-h-0">
         <div className="flex flex-col gap-4 w-full pb-4">
+          <GoogleWorkspaceConnect
+            onConnectionChange={() => {
+              void mutateMcpServers();
+            }}
+          />
           {isLoading ? (
             <>
               <ActionCardSkeleton />

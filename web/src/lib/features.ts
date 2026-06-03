@@ -1,5 +1,5 @@
 export const FEATURES = {
-  AGENTS: false,
+  AGENTS: true,
   INTEGRATIONS: true,
   ORG_MANAGEMENT: true,
   USAGE_ANALYTICS: false,
