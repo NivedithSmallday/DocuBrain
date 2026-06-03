@@ -1011,8 +1011,8 @@ class EmbeddingModel:
         server_port: int,
         retrim_content: bool = False,
     ) -> "EmbeddingModel":
-        # Audit fix #8: ensure nomic-style local models always carry the required
-        # search_query/search_document task prefixes even if the DB row omitted them.
+        # Ensure nomic-style local models carry the required search_query/
+        # search_document task prefixes even if the DB row omitted them.
         resolved_query_prefix, resolved_passage_prefix = resolve_embedding_prefixes(
             model_name=search_settings.model_name,
             provider_type=search_settings.provider_type,

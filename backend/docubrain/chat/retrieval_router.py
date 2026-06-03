@@ -439,7 +439,7 @@ def _build_decision(
 ) -> RoutingDecision:
     """Build a RoutingDecision with soft tool prioritization.
 
-    INVARIANT (audit fix #4): when an internal-search (Vespa) tool is available,
+    INVARIANT: when an internal-search (Vespa) tool is available,
     Vespa MUST participate in retrieval. The router may *prioritize* other tools,
     but it must NEVER exclude or deprioritize Vespa — doing so caused indexed
     documents to never be searched for Drive/metadata/email queries.

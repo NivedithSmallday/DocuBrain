@@ -231,9 +231,7 @@ class DefaultIndexingEmbedder(IndexingEmbedder):
         search_settings: SearchSettings,
         callback: IndexingHeartbeatInterface | None = None,
     ) -> "DefaultIndexingEmbedder":
-        # Audit fix #8: passages for nomic-style local models must be embedded with
-        # the "search_document:" prefix. Auto-resolve if the DB row omitted it so
-        # indexing and querying stay symmetric.
+        # Auto-resolve nomic-style prefixes if the DB row omitted them.
         resolved_query_prefix, resolved_passage_prefix = resolve_embedding_prefixes(
             model_name=search_settings.model_name,
             provider_type=search_settings.provider_type,

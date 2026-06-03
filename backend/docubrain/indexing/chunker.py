@@ -162,10 +162,7 @@ class Chunker:
         def token_counter(text: str) -> int:
             return len(tokenizer.encode(text))
 
-        # Audit fix #7: derive a small token overlap from CHUNK_OVERLAP_PERCENT so a
-        # fact spanning a chunk boundary survives intact in at least one chunk.
-        # An explicit non-zero chunk_overlap arg always wins; otherwise fall back to
-        # the configured percentage of the chunk token limit (0 disables overlap).
+        # Derive token overlap from CHUNK_OVERLAP_PERCENT (0 disables overlap).
         effective_chunk_overlap = chunk_overlap or int(
             chunk_token_limit * CHUNK_OVERLAP_PERCENT / 100
         )
@@ -392,11 +389,7 @@ class Chunker:
             # CASE 2: Normal text section
             section_token_count = len(self.tokenizer.encode(section_text))
 
-            # CASE 2a (audit fix #7): Markdown table — never merge a table into a
-            # mixed prose chunk and never cut it mid-row. Finalize any pending
-            # chunk, then emit the table split on row boundaries with the header
-            # repeated per chunk (preserves row/column/header semantics), even
-            # when the table is small enough to "fit".
+            # Markdown table — split on row boundaries with header repeated per chunk.
             if self._is_markdown_table(section_text):
                 if chunk_text.strip():
                     self._create_chunk(

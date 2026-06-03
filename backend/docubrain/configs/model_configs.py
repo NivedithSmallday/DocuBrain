@@ -35,12 +35,7 @@ SIM_SCORE_RANGE_HIGH = float(os.environ.get("SIM_SCORE_RANGE_HIGH") or 1.0)
 ASYM_QUERY_PREFIX = os.environ.get("ASYM_QUERY_PREFIX", "search_query: ")
 ASYM_PASSAGE_PREFIX = os.environ.get("ASYM_PASSAGE_PREFIX", "search_document: ")
 
-# Audit fix #8: nomic-embed-text REQUIRES the "search_query:" / "search_document:"
-# task prefixes. If a SearchSettings row was created without them (or with empty
-# strings), asymmetric retrieval quality degrades measurably. We auto-resolve the
-# correct prefixes at model-construction time for local (self-hosted) nomic models
-# whenever the stored prefixes are empty. Setting AUTO_FILL_EMBEDDING_PREFIXES=false
-# disables this safety net.
+# Auto-fill nomic-style embedding task prefixes when the DB row omits them.
 AUTO_FILL_EMBEDDING_PREFIXES = (
     os.environ.get("AUTO_FILL_EMBEDDING_PREFIXES") or "true"
 ).lower() == "true"

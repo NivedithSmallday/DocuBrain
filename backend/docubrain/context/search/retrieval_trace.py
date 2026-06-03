@@ -1,4 +1,4 @@
-"""Retrieval observability / tracing (audit fix #9).
+"""Retrieval observability / tracing.
 
 Persists a structured trace of every retrieval call so failures can be
 diagnosed offline:
@@ -89,7 +89,7 @@ def record_query_trace(
     chat_session_id: str | None = None,
     tenant_id: str | None = None,
 ) -> None:
-    """Record one authoritative per-turn trace (audit fix #9 / Phase-4 KPI).
+    """Record one authoritative per-turn trace.
 
     This is written for EVERY user turn — including turns where retrieval was
     never invoked — so ``% of knowledge queries that invoke retrieval`` can be

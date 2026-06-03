@@ -195,9 +195,8 @@ CHUNK_SIZE_BUFFER = 64  # extra bytes past the limit to read
 
 # Mapping of Google Drive mime types to export formats.
 # Sheets exported as XLSX to capture ALL tabs (CSV only exports the first sheet).
-# Audit fix #6: Docs exported as DOCX (not text/plain) so tables keep their
-# row/column/header structure — parsed via markitdown into markdown tables, the
-# same table-preserving path used for native .docx ingestion.
+# Docs exported as DOCX (not text/plain) so tables keep their structure —
+# parsed via markitdown into markdown tables, like native .docx ingestion.
 DOCX_EXPORT_MIME_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 )
@@ -357,8 +356,7 @@ def _download_and_extract_sections_basic(
             text = xlsx_to_text(io.BytesIO(response), file_name=file_name)
             return [TextSection(link=link, text=text)] if text else []
 
-        # Google Docs: exported as DOCX, parsed via markitdown so tables retain
-        # their row/column/header structure (audit fix #6).
+        # Google Docs: exported as DOCX, parsed via markitdown to retain tables.
         if mime_type == GDriveMimeType.DOC.value:
             try:
                 text, _ = read_docx_file(io.BytesIO(response), file_name=file_name)

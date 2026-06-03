@@ -811,20 +811,12 @@ MINI_CHUNK_SIZE = 150
 # This is the number of regular chunks per large chunk
 LARGE_CHUNK_RATIO = 4
 
-# Audit fix #7: chunk overlap as a percentage of the chunk token limit. A small
-# overlap (~10-15%) keeps facts that straddle a chunk boundary retrievable in at
-# least one chunk. Set to 0 to restore the previous no-overlap behavior.
+# Chunk overlap as a percentage of the chunk token limit. Set to 0 to disable.
 CHUNK_OVERLAP_PERCENT = int(os.environ.get("CHUNK_OVERLAP_PERCENT") or 15)
 
-# Audit fix #5: OCR fallback for scanned / image-only PDFs. When a PDF has no
-# extractable text layer, run OCR (Unstructured if configured, else local
-# Tesseract) instead of silently dropping the document. Requires the optional
-# `pytesseract` + `pdf2image` packages and a Tesseract binary on the host for the
-# local path; degrades gracefully (logs a warning) if they are unavailable.
+# OCR fallback for scanned / image-only PDFs. Degrades gracefully if unavailable.
 ENABLE_PDF_OCR = (os.environ.get("ENABLE_PDF_OCR") or "true").lower() == "true"
-# Hard cap on pages OCR'd per PDF to bound latency/cost on very large scans.
 PDF_OCR_MAX_PAGES = int(os.environ.get("PDF_OCR_MAX_PAGES") or 50)
-# Rendering DPI for the local Tesseract path.
 PDF_OCR_DPI = int(os.environ.get("PDF_OCR_DPI") or 200)
 
 # The maximum number of chunks that can be held for 1 document processing batch

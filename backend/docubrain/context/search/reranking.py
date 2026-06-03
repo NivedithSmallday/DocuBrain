@@ -1,4 +1,4 @@
-"""Cross-encoder reranking stage (audit fix #3).
+"""Cross-encoder reranking stage.
 
 Sits between hybrid retrieval and the LLM chunk-selection step:
 

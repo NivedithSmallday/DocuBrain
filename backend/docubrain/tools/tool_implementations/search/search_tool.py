@@ -806,10 +806,8 @@ class SearchTool(Tool[SearchToolOverrideKwargs]):
             id_extractor=lambda chunk: f"{chunk.document_id}_{chunk.chunk_id}",
         )
 
-        # Audit fix #3: cross-encoder reranking stage. Reorders the fused Top-N
-        # by true query-passage relevance and keeps the strongest RERANK_TOP_N
-        # before the (expensive) LLM-selection step. No-op when ENABLE_RERANKER
-        # is false or if the reranker is unavailable (graceful fallback).
+        # Cross-encoder reranking: reorder the fused Top-N by query-passage
+        # relevance before LLM selection. No-op when disabled/unavailable.
         rerank_query = (
             override_kwargs.original_query
             or semantic_query
@@ -823,7 +821,7 @@ class SearchTool(Tool[SearchToolOverrideKwargs]):
                 top_n=max(RERANK_TOP_N, MAX_CHUNKS_FOR_RELEVANCE),
             )
 
-        # Audit fix #9: persist a retrieval trace for offline debugging/eval.
+        # Persist a retrieval trace for offline debugging/eval.
         if ENABLE_RETRIEVAL_TRACING:
             try:
                 record_retrieval_trace(

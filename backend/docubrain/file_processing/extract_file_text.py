@@ -214,14 +214,10 @@ def pdf_to_text(file: IO[Any], pdf_pass: str | None = None) -> str:
 
 
 def ocr_pdf_to_text(pdf_bytes: bytes, file_name: str = "") -> str:
-    """OCR a scanned / image-only PDF (audit fix #5).
+    """OCR a scanned / image-only PDF.
 
-    Order of preference:
-      1. Unstructured (hi-res OCR) when an Unstructured API key is configured.
-      2. Local Tesseract via ``pdf2image`` + ``pytesseract``.
-
-    Returns extracted text, or "" if OCR is unavailable/fails. Never raises.
-    Logs ``OCR_USED=true`` on success so indexing of scanned PDFs is observable.
+    Prefers Unstructured (hi-res) when an API key is configured, else falls back
+    to local Tesseract. Returns "" if OCR is unavailable/fails; never raises.
     """
     if not pdf_bytes:
         return ""
@@ -229,9 +225,7 @@ def ocr_pdf_to_text(pdf_bytes: bytes, file_name: str = "") -> str:
     from docubrain.configs.app_configs import PDF_OCR_DPI
     from docubrain.configs.app_configs import PDF_OCR_MAX_PAGES
 
-    # 1. Unstructured (hosted hi-res OCR) — only if an API key is configured.
-    #    Wrapped defensively: resolving the key touches the KV store / DB and must
-    #    never crash indexing if those are unavailable.
+    # Unstructured (hosted hi-res OCR) — only if an API key is configured.
     try:
         unstructured_enabled = bool(get_unstructured_api_key())
     except Exception as e:
@@ -337,9 +331,8 @@ def read_pdf_file(
             page.extract_text() for page in pdf_reader.pages
         )
 
-        # Audit fix #5: scanned / image-only PDFs have no text layer, so
-        # extract_text() returns (near) empty. Rather than silently dropping the
-        # document downstream, run OCR and continue indexing.
+        # Scanned / image-only PDFs have no text layer; OCR instead of
+        # dropping the document.
         from docubrain.configs.app_configs import ENABLE_PDF_OCR
 
         if ENABLE_PDF_OCR and not text.strip():

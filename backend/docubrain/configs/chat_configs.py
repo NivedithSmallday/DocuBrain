@@ -4,12 +4,7 @@ PROMPTS_YAML = "./docubrain/seeding/prompts.yaml"
 PERSONAS_YAML = "./docubrain/seeding/personas.yaml"
 NUM_RETURNED_HITS = 50
 
-# ---------------------------------------------------------------------------
-# Audit fix #3: Cross-encoder reranking stage.
-# Pipeline becomes: Hybrid Retrieval (Top NUM_RETURNED_HITS) -> Cross-Encoder
-# Reranker -> Top RERANK_TOP_N -> LLM Selection -> Answer.
-# Disabled by default so behavior is unchanged until explicitly enabled.
-# ---------------------------------------------------------------------------
+# Cross-encoder reranking stage (disabled by default).
 ENABLE_RERANKER = os.environ.get("ENABLE_RERANKER", "false").lower() == "true"
 # How many reranked chunks to keep and forward to the LLM-selection step.
 RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N") or 10)
@@ -21,12 +16,7 @@ RERANKER_MODEL = os.environ.get("RERANKER_MODEL") or "BAAI/bge-reranker-large"
 RERANKER_API_KEY = os.environ.get("RERANKER_API_KEY") or None
 RERANKER_API_URL = os.environ.get("RERANKER_API_URL") or None
 
-# ---------------------------------------------------------------------------
-# Audit fix #9: Retrieval observability / tracing.
-# When enabled, each retrieval call persists a structured JSONL trace
-# (query, generated queries, retrieved/reranked/sent chunks, latency) for
-# offline debugging and evaluation. Disabled by default (zero overhead).
-# ---------------------------------------------------------------------------
+# Retrieval observability / tracing (disabled by default, zero overhead).
 ENABLE_RETRIEVAL_TRACING = (
     os.environ.get("ENABLE_RETRIEVAL_TRACING", "false").lower() == "true"
 )
