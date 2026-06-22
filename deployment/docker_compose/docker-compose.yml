@@ -54,7 +54,7 @@ services:
         required: false
     depends_on:
       relational_db:
-        condition: service_started
+        condition: service_healthy
       index:
         condition: service_started
       cache:
@@ -140,7 +140,7 @@ services:
         required: false
     depends_on:
       relational_db:
-        condition: service_started
+        condition: service_healthy
       index:
         condition: service_started
       cache:
@@ -375,8 +375,11 @@ services:
     # DEV: To expose ports, either:
     # 1. Use docker-compose.dev.yml: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --wait
     # 2. Uncomment the ports below
-    # ports:
-    #   - "5432:5432"
+    # Bind to loopback only: reachable from host tooling (psql) during dev, but
+    # NOT exposed to the network. The default POSTGRES_PASSWORD is weak, so never
+    # bind this to 0.0.0.0. For production, comment the ports out entirely.
+    ports:
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 10s

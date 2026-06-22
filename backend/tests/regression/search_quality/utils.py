@@ -1,4 +1,5 @@
 import json
+import math
 import re
 from pathlib import Path
 from textwrap import indent
@@ -158,6 +159,25 @@ def ragas_evaluate(
             ],
         ),
     )
+
+
+def ndcg_at_k(relevant_ranks: list[int], num_relevant: int, k: int) -> float:
+    """Normalized Discounted Cumulative Gain at k for binary relevance.
+
+    Args:
+        relevant_ranks: 1-indexed positions of relevant docs in the result list.
+        num_relevant: total number of relevant (ground-truth) docs for the query.
+        k: cutoff.
+
+    Returns:
+        NDCG@k in [0, 1]; 0.0 when there are no relevant docs.
+    """
+    if num_relevant <= 0:
+        return 0.0
+    dcg = sum(1.0 / math.log2(rank + 1) for rank in relevant_ranks if rank <= k)
+    ideal_hits = min(num_relevant, k)
+    idcg = sum(1.0 / math.log2(i + 1) for i in range(1, ideal_hits + 1))
+    return dcg / idcg if idcg > 0 else 0.0
 
 
 def compute_overall_scores(metrics: CombinedMetrics) -> tuple[float, float]:

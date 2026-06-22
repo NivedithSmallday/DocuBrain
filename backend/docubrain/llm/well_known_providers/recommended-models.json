@@ -63,6 +63,38 @@
           "display_name": "Kimi K2 0905"
         }
       ]
+    },
+    "nvidia": {
+      "default_model": {
+        "name": "deepseek-ai/deepseek-v4-flash",
+        "display_name": "DeepSeek V4 Flash"
+      },
+      "additional_visible_models": [
+        {
+          "name": "deepseek-ai/deepseek-v4-flash",
+          "display_name": "DeepSeek V4 Flash"
+        },
+        {
+          "name": "deepseek-ai/deepseek-r1",
+          "display_name": "DeepSeek R1"
+        },
+        {
+          "name": "meta/llama-3.3-70b-instruct",
+          "display_name": "Llama 3.3 70B Instruct"
+        },
+        {
+          "name": "meta/llama-3.1-405b-instruct",
+          "display_name": "Llama 3.1 405B Instruct"
+        },
+        {
+          "name": "mistralai/mistral-large-2",
+          "display_name": "Mistral Large 2"
+        },
+        {
+          "name": "google/gemma-3",
+          "display_name": "Gemma 3"
+        }
+      ]
     }
   }
 }

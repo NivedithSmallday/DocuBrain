@@ -54,6 +54,7 @@ from tests.regression.search_quality.models import OneshotQAResult
 from tests.regression.search_quality.models import TestQuery
 from tests.regression.search_quality.utils import compute_overall_scores
 from tests.regression.search_quality.utils import find_document_id
+from tests.regression.search_quality.utils import ndcg_at_k
 from tests.regression.search_quality.utils import get_federated_sources
 from tests.regression.search_quality.utils import LazyJsonWriter
 from tests.regression.search_quality.utils import ragas_evaluate
@@ -93,6 +94,8 @@ class SearchAnswerAnalyzer:
                 worst_rank=1,
                 average_rank=0.0,
                 top_k_accuracy={k: 0.0 for k in TOP_K_LIST},
+                mrr=0.0,
+                ndcg={k: 0.0 for k in TOP_K_LIST},
                 response_relevancy=0.0,
                 faithfulness=0.0,
                 factual_correctness=0.0,
@@ -183,6 +186,8 @@ class SearchAnswerAnalyzer:
                     "worst_rank",
                     "avg_rank",
                     *[f"top_{k}_accuracy" for k in TOP_K_LIST],
+                    "mrr",
+                    *[f"ndcg_at_{k}" for k in TOP_K_LIST],
                     *(
                         [
                             "avg_response_relevancy",
@@ -219,6 +224,9 @@ class SearchAnswerAnalyzer:
                     )
                     for k, acc in metrics.top_k_accuracy.items():
                         print(f"  top-{k} accuracy: {acc:.1f}%")
+                    print(f"  MRR: {metrics.mrr:.3f}")
+                    for k, val in metrics.ndcg.items():
+                        print(f"  NDCG@{k}: {val:.3f}")
                 if not self.config.search_only:
                     if metrics.n_response_relevancy > 0:
                         print(
@@ -246,6 +254,8 @@ class SearchAnswerAnalyzer:
                         worst_rank or "",
                         f"{avg_rank:.2f}" if avg_rank is not None else "",
                         *[f"{acc:.1f}" for acc in metrics.top_k_accuracy.values()],
+                        f"{metrics.mrr:.3f}",
+                        *[f"{val:.3f}" for val in metrics.ndcg.values()],
                         *(
                             [
                                 (
@@ -469,15 +479,18 @@ class SearchAnswerAnalyzer:
     def _run_and_analyze_one(self, test_case: TestQuery, total: int) -> AnalysisSummary:
         result = self._perform_search(test_case.question)
 
-        # compute rank
+        # compute rank (first hit) and the positions of all ground-truth hits
         rank = None
         found = False
         ground_truths = set(test_case.ground_truth_docids)
+        relevant_ranks: list[int] = []
         for i, doc in enumerate(result.top_documents, 1):
             if doc.document_id in ground_truths:
-                rank = i
-                found = True
-                break
+                if rank is None:
+                    rank = i
+                    found = True
+                relevant_ranks.append(i)
+        reciprocal_rank = 1.0 / rank if rank else 0.0
 
         # print search progress and result
         with self._lock:
@@ -532,6 +545,8 @@ class SearchAnswerAnalyzer:
             categories=test_case.categories,
             found=found,
             rank=rank,
+            reciprocal_rank=reciprocal_rank,
+            relevant_ranks=relevant_ranks,
             total_results=len(result.top_documents),
             ground_truth_count=len(test_case.ground_truth_docids),
             answer=result.answer,
@@ -553,6 +568,13 @@ class SearchAnswerAnalyzer:
         for cat in result.categories + ["all"]:
             self.metrics[cat].total_queries += 1
             self.metrics[cat].average_time_taken += result.time_taken
+
+            # MRR and NDCG@k are averaged over ALL queries (not just found ones).
+            self.metrics[cat].mrr += result.reciprocal_rank
+            for k in TOP_K_LIST:
+                self.metrics[cat].ndcg[k] += ndcg_at_k(
+                    result.relevant_ranks, result.ground_truth_count, k
+                )
 
             if result.found:
                 self.metrics[cat].found_count += 1
@@ -580,12 +602,14 @@ class SearchAnswerAnalyzer:
         for cat in self.metrics:
             total = self.metrics[cat].total_queries
             self.metrics[cat].average_time_taken /= total
+            self.metrics[cat].mrr /= total
 
             if self.metrics[cat].found_count > 0:
                 self.metrics[cat].average_rank /= self.metrics[cat].found_count
             for k in TOP_K_LIST:
                 self.metrics[cat].top_k_accuracy[k] /= total
                 self.metrics[cat].top_k_accuracy[k] *= 100
+                self.metrics[cat].ndcg[k] /= total
 
             if self.config.search_only:
                 continue

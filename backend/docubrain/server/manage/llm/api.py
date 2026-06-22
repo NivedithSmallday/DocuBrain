@@ -52,6 +52,7 @@ from docubrain.llm.well_known_providers.auto_update_service import (
     fetch_llm_recommendations_from_github,
 )
 from docubrain.llm.well_known_providers.constants import LM_STUDIO_API_KEY_CONFIG_KEY
+from docubrain.llm.well_known_providers.constants import NVIDIA_DEFAULT_API_BASE
 from docubrain.llm.well_known_providers.llm_provider_options import (
     fetch_available_well_known_llms,
 )
@@ -74,6 +75,8 @@ from docubrain.server.manage.llm.models import LLMProviderUpsertRequest
 from docubrain.server.manage.llm.models import LLMProviderView
 from docubrain.server.manage.llm.models import LMStudioFinalModelResponse
 from docubrain.server.manage.llm.models import LMStudioModelsRequest
+from docubrain.server.manage.llm.models import NvidiaFinalModelResponse
+from docubrain.server.manage.llm.models import NvidiaModelsRequest
 from docubrain.server.manage.llm.models import ModelConfigurationUpsertRequest
 from docubrain.server.manage.llm.models import OllamaFinalModelResponse
 from docubrain.server.manage.llm.models import OllamaModelDetails
@@ -1695,3 +1698,102 @@ def _get_openai_compatible_server_response(
         source_name="OpenAI-Compatible",
         api_key=api_key,
     )
+
+
+@admin_router.post("/nvidia/available-models")
+def get_nvidia_available_models(
+    request: NvidiaModelsRequest,
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+    db_session: Session = Depends(get_session),
+) -> list[NvidiaFinalModelResponse]:
+    """Fetch available models from NVIDIA's hosted OpenAI-compatible endpoint.
+
+    NVIDIA exposes a standard `/v1/models` listing at
+    https://integrate.api.nvidia.com/v1. When the user hasn't changed the API
+    key in the form (it is masked), fall back to the stored key.
+    """
+    api_base = (request.api_base or NVIDIA_DEFAULT_API_BASE).strip().rstrip("/")
+    if not api_base:
+        api_base = NVIDIA_DEFAULT_API_BASE
+
+    api_key = request.api_key
+    if request.provider_name and not request.api_key_changed:
+        existing_provider = fetch_existing_llm_provider(
+            name=request.provider_name, db_session=db_session
+        )
+        if existing_provider and existing_provider.api_key:
+            api_key = existing_provider.api_key.get_value(apply_mask=False)
+
+    if not api_key:
+        raise DocubrainError(
+            DocubrainErrorCode.VALIDATION_ERROR,
+            "An NVIDIA API key is required to fetch available models.",
+        )
+
+    url = f"{api_base}/models" if api_base.endswith("/v1") else f"{api_base}/v1/models"
+    response_json = _get_openai_compatible_models_response(
+        url=url,
+        source_name="NVIDIA",
+        api_key=api_key,
+    )
+
+    models = response_json.get("data", [])
+    if not isinstance(models, list) or len(models) == 0:
+        raise DocubrainError(
+            DocubrainErrorCode.VALIDATION_ERROR,
+            "No models found from NVIDIA.",
+        )
+
+    results: list[NvidiaFinalModelResponse] = []
+    for model in models:
+        try:
+            model_id = model.get("id", "")
+            if not model_id:
+                continue
+
+            # Skip embedding/reranking models — this list is for chat/generation.
+            if is_embedding_model(model_id) or "embed" in model_id.lower():
+                continue
+
+            display_name = model.get("name") or model_id
+            results.append(
+                NvidiaFinalModelResponse(
+                    name=model_id,
+                    display_name=display_name,
+                    max_input_tokens=model.get("context_length"),
+                    supports_image_input=infer_vision_support(model_id),
+                    supports_reasoning=is_reasoning_model(model_id, display_name),
+                )
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to parse NVIDIA model entry",
+                extra={"error": str(e), "item": str(model)[:1000]},
+            )
+
+    if not results:
+        raise DocubrainError(
+            DocubrainErrorCode.VALIDATION_ERROR,
+            "No compatible chat models found from NVIDIA.",
+        )
+
+    sorted_results = sorted(results, key=lambda m: m.name.lower())
+
+    # Sync new models to DB if provider_name is specified
+    if request.provider_name:
+        _sync_fetched_models(
+            db_session=db_session,
+            provider_name=request.provider_name,
+            models=[
+                SyncModelEntry(
+                    name=r.name,
+                    display_name=r.display_name,
+                    max_input_tokens=r.max_input_tokens,
+                    supports_image_input=r.supports_image_input,
+                )
+                for r in sorted_results
+            ],
+            source_label="NVIDIA",
+        )
+
+    return sorted_results

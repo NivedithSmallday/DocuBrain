@@ -3,8 +3,19 @@ import type { OnboardingActions } from "@/interfaces/onboarding";
 export enum LLMProviderName {
   OLLAMA_CHAT = "ollama_chat",
   OPENAI_COMPATIBLE = "openai_compatible",
+  NVIDIA = "nvidia",
   CUSTOM = "custom",
 }
+
+/** NVIDIA hosted endpoint default (OpenAI-compatible). */
+export const NVIDIA_DEFAULT_API_BASE = "https://integrate.api.nvidia.com/v1";
+export const NVIDIA_DEFAULT_MODEL = "deepseek-ai/deepseek-v4-flash";
+
+/** custom_config keys used to persist NVIDIA reasoning settings. */
+export const NVIDIA_REASONING_ENABLED_CONFIG_KEY = "NVIDIA_REASONING_ENABLED";
+export const NVIDIA_REASONING_EFFORT_CONFIG_KEY = "NVIDIA_REASONING_EFFORT";
+
+export type NvidiaReasoningEffort = "low" | "medium" | "high";
 
 export interface ModelConfiguration {
   name: string;
@@ -117,6 +128,23 @@ export interface OpenAICompatibleModelResponse {
   supports_reasoning: boolean;
 }
 
+export interface NvidiaFetchParams {
+  api_key?: string;
+  api_key_changed?: boolean;
+  api_base?: string;
+  provider_name?: string;
+  signal?: AbortSignal;
+}
+
+export interface NvidiaModelResponse {
+  name: string;
+  display_name: string;
+  max_input_tokens: number | null;
+  supports_image_input: boolean;
+  supports_reasoning: boolean;
+}
+
 export type FetchModelsParams =
   | OpenAICompatibleFetchParams
-  | OllamaFetchParams;
+  | OllamaFetchParams
+  | NvidiaFetchParams;

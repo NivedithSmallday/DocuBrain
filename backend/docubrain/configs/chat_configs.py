@@ -4,8 +4,15 @@ PROMPTS_YAML = "./docubrain/seeding/prompts.yaml"
 PERSONAS_YAML = "./docubrain/seeding/personas.yaml"
 NUM_RETURNED_HITS = 50
 
-# Cross-encoder reranking stage (disabled by default).
-ENABLE_RERANKER = os.environ.get("ENABLE_RERANKER", "false").lower() == "true"
+# Cross-encoder reranking stage.
+# Enabled by default ON THIS BRANCH so the search-quality eval gate can measure
+# the precision delta (MRR/NDCG) of reranking vs. raw hybrid order. The reranker
+# degrades gracefully to the original order if the model server can't serve it
+# (see context/search/reranking.py), so this is safe, but it adds one model call
+# per search. Requirements before merging to main: (1) the model server serves
+# RERANKER_MODEL, and (2) the eval gate shows a positive delta. Set
+# ENABLE_RERANKER=false to opt out.
+ENABLE_RERANKER = os.environ.get("ENABLE_RERANKER", "true").lower() == "true"
 # How many reranked chunks to keep and forward to the LLM-selection step.
 RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N") or 10)
 # Provider: "" / "local" -> self-hosted cross-encoder via the model server
@@ -19,6 +26,23 @@ RERANKER_API_URL = os.environ.get("RERANKER_API_URL") or None
 # Retrieval observability / tracing (disabled by default, zero overhead).
 ENABLE_RETRIEVAL_TRACING = (
     os.environ.get("ENABLE_RETRIEVAL_TRACING", "false").lower() == "true"
+)
+
+# ---------------------------------------------------------------------------
+# Answer-grounding verification (disabled by default). When enabled, generated
+# answers are checked AFTER generation for (a) citation validity — every [n]
+# marker must reference a real retrieved document — and, when an LLM is
+# available, (b) claim grounding — sentences are flagged when no cited evidence
+# supports them. Citation validation is cheap and LLM-free; the grounding judge
+# costs one extra LLM call and is gated separately to keep latency opt-in.
+# ---------------------------------------------------------------------------
+ENABLE_ANSWER_VERIFICATION = (
+    os.environ.get("ENABLE_ANSWER_VERIFICATION", "false").lower() == "true"
+)
+# Whether the (more expensive) LLM grounding judge runs in addition to the
+# free citation-validity check. Only consulted when ENABLE_ANSWER_VERIFICATION.
+ENABLE_ANSWER_GROUNDING_JUDGE = (
+    os.environ.get("ENABLE_ANSWER_GROUNDING_JUDGE", "false").lower() == "true"
 )
 
 # ---------------------------------------------------------------------------

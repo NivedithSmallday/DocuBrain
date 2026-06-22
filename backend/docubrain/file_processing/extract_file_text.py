@@ -649,6 +649,62 @@ def xlsx_to_text(file: IO[Any], file_name: str = "") -> str:
     return TEXT_SECTION_SEPARATOR.join(text_content)
 
 
+# Strip thousands separators / whitespace (incl. non-breaking space) before
+# attempting numeric coercion.
+_NUMERIC_CLEAN_RE = re.compile(r"[,\s ]")
+# Leading currency symbol (USD/EUR/GBP/INR/JPY) that should not defeat numeric
+# detection of an otherwise-numeric cell.
+_CURRENCY_PREFIX_RE = re.compile(r"^[\$€£₹¥]\s?")
+_NUMBER_RE = re.compile(r"-?\d+(\.\d+)?")
+_DATE_RE = re.compile(r"\d{1,4}[-/]\d{1,2}[-/]\d{1,4}")
+
+
+def coerce_cell_value(raw: str) -> tuple[str, float | None]:
+    """Classify a spreadsheet cell value for typed/structured indexing.
+
+    Returns ``(cell_type, numeric_value)`` where ``cell_type`` is one of
+    ``"number" | "date" | "bool" | "text" | "empty"`` and ``numeric_value`` is
+    the parsed float for numeric cells (else ``None``). Currency symbols,
+    thousands separators, and a trailing percent sign are tolerated so that
+    ``"₹12,300"`` and ``"12300"`` are both recognized as numbers — enabling
+    numeric filtering/aggregation downstream instead of treating every cell as
+    opaque text.
+    """
+    val = (raw or "").strip()
+    if not val:
+        return "empty", None
+
+    if val.lower() in ("true", "false", "yes", "no"):
+        return "bool", None
+
+    candidate = _CURRENCY_PREFIX_RE.sub("", val).rstrip("%")
+    candidate = _NUMERIC_CLEAN_RE.sub("", candidate)
+    if candidate and _NUMBER_RE.fullmatch(candidate):
+        try:
+            return "number", float(candidate)
+        except ValueError:
+            pass
+
+    if _DATE_RE.fullmatch(val):
+        return "date", None
+
+    return "text", None
+
+
+def _typed_fields(
+    fields: dict[str, str],
+) -> tuple[dict[str, str], dict[str, float]]:
+    """Derive ``field_types`` and ``numeric_fields`` from raw string fields."""
+    field_types: dict[str, str] = {}
+    numeric_fields: dict[str, float] = {}
+    for header, value in fields.items():
+        cell_type, numeric_value = coerce_cell_value(value)
+        field_types[header] = cell_type
+        if numeric_value is not None:
+            numeric_fields[header] = numeric_value
+    return field_types, numeric_fields
+
+
 def xlsx_to_row_records(
     file: IO[Any],
     file_name: str = "",
@@ -709,11 +765,14 @@ def xlsx_to_row_records(
             record_text = " | ".join(text_parts)
             record_text = f"Record from {file_name} — {sheet.title}:\n{record_text}"
 
+            field_types, numeric_fields = _typed_fields(fields)
             records.append({
                 "text": record_text,
                 "sheet_name": sheet.title,
                 "row_index": row_idx,
                 "fields": fields,
+                "field_types": field_types,
+                "numeric_fields": numeric_fields,
                 "file_name": file_name,
             })
 
@@ -756,11 +815,14 @@ def csv_text_to_row_records(
         record_text = " | ".join(text_parts)
         record_text = f"Record from {file_name} — {sheet_name}:\n{record_text}"
 
+        field_types, numeric_fields = _typed_fields(fields)
         records.append({
             "text": record_text,
             "sheet_name": sheet_name,
             "row_index": row_idx,
             "fields": fields,
+            "field_types": field_types,
+            "numeric_fields": numeric_fields,
             "file_name": file_name,
         })
 

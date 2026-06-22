@@ -11,6 +11,7 @@ fallback when primary retrieval returns empty results.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -114,14 +115,55 @@ _DRIVE_SIGNALS = re.compile(
     re.IGNORECASE,
 )
 
-_INTERNAL_KNOWLEDGE_SIGNALS = re.compile(
-    r"\b(hr|human\s+resources|polic(?:y|ies)|leave|leaves|maternity|"
-    r"paternity|sick\s+leave|earned\s+leave|attendance|working\s+hours|"
-    r"induction|onboarding|employee|employees|role|designation|doj|"
-    r"date\s+of\s+joining|company\s+(?:do|does|profile|overview)|"
-    r"smallday)\b",
-    re.IGNORECASE,
-)
+# Base internal-knowledge vocabulary that biases routing toward the Vespa index.
+# Each entry is a regex fragment matched on word boundaries, case-insensitively.
+_DEFAULT_INTERNAL_KNOWLEDGE_TERMS: list[str] = [
+    r"hr",
+    r"human\s+resources",
+    r"polic(?:y|ies)",
+    r"leave",
+    r"leaves",
+    r"maternity",
+    r"paternity",
+    r"sick\s+leave",
+    r"earned\s+leave",
+    r"attendance",
+    r"working\s+hours",
+    r"induction",
+    r"onboarding",
+    r"employee",
+    r"employees",
+    r"role",
+    r"designation",
+    r"doj",
+    r"date\s+of\s+joining",
+    r"company\s+(?:do|does|profile|overview)",
+    r"smallday",
+]
+
+
+def _build_internal_knowledge_pattern() -> "re.Pattern[str]":
+    """Compile the internal-knowledge signal regex.
+
+    Tenant/deployment-specific terms can be appended via the
+    ``RETRIEVAL_ROUTER_INTERNAL_TERMS`` env var (comma-separated) so the
+    vocabulary can be extended without code changes — e.g. company-specific
+    product names, internal tools, or HR portal names. User-supplied terms are
+    regex-escaped and matched flexibly across whitespace.
+    """
+    terms = list(_DEFAULT_INTERNAL_KNOWLEDGE_TERMS)
+    extra = os.environ.get("RETRIEVAL_ROUTER_INTERNAL_TERMS", "")
+    for raw_term in extra.split(","):
+        term = raw_term.strip()
+        if not term:
+            continue
+        # Escape regex metacharacters, then let any run of whitespace match.
+        fragment = re.escape(term).replace(r"\ ", r"\s+").replace(" ", r"\s+")
+        terms.append(fragment)
+    return re.compile(r"\b(" + "|".join(terms) + r")\b", re.IGNORECASE)
+
+
+_INTERNAL_KNOWLEDGE_SIGNALS = _build_internal_knowledge_pattern()
 
 _FRESHNESS_SIGNALS = re.compile(
     r"\b(recent|latest|today|yesterday|this\s+week|last\s+week|"

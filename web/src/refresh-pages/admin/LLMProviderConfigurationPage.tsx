@@ -36,6 +36,7 @@ import {
 import { getModalForExistingProvider } from "@/sections/modals/llmConfig/getModal";
 import OllamaModal from "@/sections/modals/llmConfig/OllamaModal";
 import OpenAICompatibleModal from "@/sections/modals/llmConfig/OpenAICompatibleModal";
+import NvidiaModal from "@/sections/modals/llmConfig/NvidiaModal";
 import { Section } from "@/layouts/general-layouts";
 import { markdown } from "@opal/utils";
 
@@ -48,6 +49,7 @@ const route = ADMIN_ROUTES.LLM_MODELS;
 // Client-side ordering for the "Add Provider" cards. The backend may return
 // wellKnownLLMProviders in an arbitrary order, so we sort explicitly here.
 const PROVIDER_DISPLAY_ORDER: string[] = [
+  LLMProviderName.NVIDIA,
   LLMProviderName.OLLAMA_CHAT,
   LLMProviderName.OPENAI_COMPATIBLE,
 ];
@@ -67,6 +69,9 @@ const PROVIDER_MODAL_MAP: Record<
       shouldMarkAsDefault={d}
       onOpenChange={onOpenChange}
     />
+  ),
+  nvidia: (d, onOpenChange) => (
+    <NvidiaModal shouldMarkAsDefault={d} onOpenChange={onOpenChange} />
   ),
 };
 

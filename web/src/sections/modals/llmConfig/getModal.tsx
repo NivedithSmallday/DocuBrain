@@ -1,6 +1,7 @@
 import { LLMProviderName, LLMProviderView } from "@/interfaces/llm";
 import OllamaModal from "@/sections/modals/llmConfig/OllamaModal";
 import OpenAICompatibleModal from "@/sections/modals/llmConfig/OpenAICompatibleModal";
+import NvidiaModal from "@/sections/modals/llmConfig/NvidiaModal";
 
 export function getModalForExistingProvider(
   provider: LLMProviderView,
@@ -18,6 +19,8 @@ export function getModalForExistingProvider(
       return <OllamaModal {...props} />;
     case LLMProviderName.OPENAI_COMPATIBLE:
       return <OpenAICompatibleModal {...props} />;
+    case LLMProviderName.NVIDIA:
+      return <NvidiaModal {...props} />;
     default:
       return null;
   }

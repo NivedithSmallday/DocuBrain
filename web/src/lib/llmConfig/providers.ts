@@ -6,11 +6,13 @@ import { LLMProviderName } from "@/interfaces/llm";
 export const AGGREGATOR_PROVIDERS = new Set<string>([
   LLMProviderName.OLLAMA_CHAT,
   LLMProviderName.OPENAI_COMPATIBLE,
+  LLMProviderName.NVIDIA,
 ]);
 
 const PROVIDER_ICONS: Record<string, IconFunctionComponent> = {
   [LLMProviderName.OLLAMA_CHAT]: SvgOllama,
   [LLMProviderName.OPENAI_COMPATIBLE]: SvgPlug,
+  [LLMProviderName.NVIDIA]: SvgCpu,
 
   // fallback
   [LLMProviderName.CUSTOM]: SvgServer,
@@ -19,6 +21,7 @@ const PROVIDER_ICONS: Record<string, IconFunctionComponent> = {
 const PROVIDER_PRODUCT_NAMES: Record<string, string> = {
   [LLMProviderName.OLLAMA_CHAT]: "Ollama",
   [LLMProviderName.OPENAI_COMPATIBLE]: "vLLM",
+  [LLMProviderName.NVIDIA]: "NVIDIA",
 
   // fallback
   [LLMProviderName.CUSTOM]: "Custom Models",
@@ -27,6 +30,7 @@ const PROVIDER_PRODUCT_NAMES: Record<string, string> = {
 const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   [LLMProviderName.OLLAMA_CHAT]: "Ollama",
   [LLMProviderName.OPENAI_COMPATIBLE]: "vLLM / OpenAI-Compatible",
+  [LLMProviderName.NVIDIA]: "NVIDIA Hosted Open Models",
 
   // fallback
   [LLMProviderName.CUSTOM]: "models from other LiteLLM-compatible providers",

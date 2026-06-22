@@ -43,6 +43,16 @@ from docubrain.llm.well_known_providers.constants import (
     AWS_SECRET_ACCESS_KEY_KWARG_ENV_VAR_FORMAT,
 )
 from docubrain.llm.well_known_providers.constants import LM_STUDIO_API_KEY_CONFIG_KEY
+from docubrain.llm.well_known_providers.constants import NVIDIA_DEFAULT_API_BASE
+from docubrain.llm.well_known_providers.constants import (
+    NVIDIA_DEFAULT_REASONING_EFFORT,
+)
+from docubrain.llm.well_known_providers.constants import (
+    NVIDIA_REASONING_EFFORT_CONFIG_KEY,
+)
+from docubrain.llm.well_known_providers.constants import (
+    NVIDIA_REASONING_ENABLED_CONFIG_KEY,
+)
 from docubrain.llm.well_known_providers.constants import OLLAMA_API_KEY_CONFIG_KEY
 from docubrain.llm.well_known_providers.constants import VERTEX_CREDENTIALS_FILE_KWARG
 from docubrain.llm.well_known_providers.constants import (
@@ -80,6 +90,42 @@ class LLMRateLimitError(Exception):
     """
     Exception raised when an LLM call is rate limited.
     """
+
+
+_NVIDIA_VALID_REASONING_EFFORTS = {"low", "medium", "high"}
+
+
+def _build_nvidia_reasoning_extra_body(
+    custom_config: dict[str, str] | None,
+) -> dict[str, Any]:
+    """Build the NVIDIA-specific reasoning payload for `extra_body`.
+
+    NVIDIA reasoning-capable models accept:
+        extra_body={"chat_template_kwargs": {"thinking": True,
+                                             "reasoning_effort": "high"}}
+
+    Reasoning is opt-in and only injected when explicitly enabled in the
+    provider's custom_config. Returns an empty dict when disabled/unset so the
+    base request is left untouched (backwards compatible with non-reasoning
+    models).
+    """
+    if not custom_config:
+        return {}
+
+    enabled_raw = custom_config.get(NVIDIA_REASONING_ENABLED_CONFIG_KEY, "")
+    if enabled_raw.strip().lower() not in ("true", "1", "yes"):
+        return {}
+
+    effort = custom_config.get(NVIDIA_REASONING_EFFORT_CONFIG_KEY, "").strip().lower()
+    if effort not in _NVIDIA_VALID_REASONING_EFFORTS:
+        effort = NVIDIA_DEFAULT_REASONING_EFFORT
+
+    return {
+        "chat_template_kwargs": {
+            "thinking": True,
+            "reasoning_effort": effort,
+        }
+    }
 
 
 def _prompt_to_dicts(prompt: LanguageModelInput) -> list[dict[str, Any]]:
@@ -327,6 +373,24 @@ class LitellmLLM(LLM):
         ):
             model_kwargs[VERTEX_LOCATION_KWARG] = "global"
 
+        # NVIDIA Hosted Open Models (NVIDIA NIM): OpenAI-compatible endpoint at
+        # https://integrate.api.nvidia.com/v1. Route through LiteLLM's openai
+        # provider, default the base URL when one is not supplied, and inject the
+        # NVIDIA-specific reasoning controls via extra_body.chat_template_kwargs.
+        if model_provider == LlmProviderNames.NVIDIA:
+            self._custom_llm_provider = "openai"
+            if not self._api_base:
+                self._api_base = NVIDIA_DEFAULT_API_BASE
+            base = self._api_base.rstrip("/")
+            self._api_base = base if base.endswith("/v1") else f"{base}/v1"
+            model_kwargs["api_base"] = self._api_base
+
+            reasoning_extra_body = _build_nvidia_reasoning_extra_body(custom_config)
+            if reasoning_extra_body:
+                merged_extra_body = dict(extra_body or {})
+                merged_extra_body.update(reasoning_extra_body)
+                extra_body = merged_extra_body
+
         # Bifrost and OpenAI-compatible: OpenAI-compatible proxies that send
         # model names directly to the endpoint. We route through LiteLLM's
         # openai provider with the server's base URL, and ensure /v1 is appended.
@@ -459,6 +523,7 @@ class LitellmLLM(LLM):
         is_openai_compatible_proxy = self._model_provider in (
             LlmProviderNames.BIFROST,
             LlmProviderNames.OPENAI_COMPATIBLE,
+            LlmProviderNames.NVIDIA,
         )
         model_provider = (
             f"{self.config.model_provider}/responses"

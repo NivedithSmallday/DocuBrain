@@ -46,6 +46,11 @@ class AnalysisSummary(BaseModel):
     categories: list[str]
     found: bool
     rank: int | None
+    # Reciprocal of the rank of the first relevant doc (0.0 if none found).
+    reciprocal_rank: float = 0.0
+    # 1-indexed positions of ALL ground-truth docs found in the results, used
+    # for NDCG@k.
+    relevant_ranks: list[int] = []
     total_results: int
     ground_truth_count: int
     response_relevancy: float | None = None
@@ -65,6 +70,10 @@ class SearchMetrics(BaseModel):
     worst_rank: int
     average_rank: float
     top_k_accuracy: dict[int, float]
+    # Mean Reciprocal Rank across all queries (0-1).
+    mrr: float = 0.0
+    # Mean NDCG@k across all queries, keyed by k (0-1).
+    ndcg: dict[int, float] = {}
 
 
 class AnswerMetrics(BaseModel):
