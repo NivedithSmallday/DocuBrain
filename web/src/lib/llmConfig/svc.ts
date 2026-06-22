@@ -21,6 +21,8 @@ import {
   OllamaFetchParams,
   OpenAICompatibleFetchParams,
   OpenAICompatibleModelResponse,
+  NvidiaFetchParams,
+  NvidiaModelResponse,
 } from "@/interfaces/llm";
 
 /**
@@ -92,6 +94,7 @@ export async function deleteLlmProvider(
 export const AGGREGATOR_PROVIDERS = new Set([
   "ollama_chat",
   "openai_compatible",
+  "nvidia",
 ]);
 
 export const isAnthropic = (_provider: string, modelName?: string) =>
@@ -214,6 +217,61 @@ export const fetchOpenAICompatibleModels = async (
 };
 
 /**
+ * Fetches models from NVIDIA's hosted OpenAI-compatible endpoint.
+ * Uses snake_case params to match API structure.
+ */
+export const fetchNvidiaModels = async (
+  params: NvidiaFetchParams
+): Promise<{ models: ModelConfiguration[]; error?: string }> => {
+  if (!params.api_key) {
+    return { models: [], error: "API Key is required" };
+  }
+
+  try {
+    const response = await fetch("/api/admin/llm/nvidia/available-models", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        api_key: params.api_key,
+        api_key_changed: params.api_key_changed ?? true,
+        api_base: params.api_base,
+        provider_name: params.provider_name,
+      }),
+      signal: params.signal,
+    });
+
+    if (!response.ok) {
+      let errorMessage = "Failed to fetch models";
+      try {
+        const errorData = await response.json();
+        errorMessage = errorData.detail || errorData.message || errorMessage;
+      } catch {
+        // ignore JSON parsing errors
+      }
+      return { models: [], error: errorMessage };
+    }
+
+    const data: NvidiaModelResponse[] = await response.json();
+    const models: ModelConfiguration[] = data.map((modelData) => ({
+      name: modelData.name,
+      display_name: modelData.display_name,
+      is_visible: true,
+      max_input_tokens: modelData.max_input_tokens,
+      supports_image_input: modelData.supports_image_input,
+      supports_reasoning: modelData.supports_reasoning,
+    }));
+
+    return { models };
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : "Unknown error";
+    return { models: [], error: errorMessage };
+  }
+};
+
+/**
  * Fetches models for a provider. Accepts form values directly and maps them
  * to the expected fetch params format internally.
  */
@@ -240,6 +298,14 @@ export const fetchModels = async (
       return fetchOpenAICompatibleModels({
         api_base: formValues.api_base,
         api_key: formValues.api_key,
+        provider_name: formValues.name,
+        signal,
+      });
+    case LLMProviderName.NVIDIA:
+      return fetchNvidiaModels({
+        api_key: formValues.api_key,
+        api_key_changed: formValues.api_key_changed,
+        api_base: formValues.api_base,
         provider_name: formValues.name,
         signal,
       });

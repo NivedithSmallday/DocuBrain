@@ -490,3 +490,20 @@ class OpenAICompatibleFinalModelResponse(BaseModel):
     max_input_tokens: int | None
     supports_image_input: bool
     supports_reasoning: bool
+
+
+# NVIDIA Hosted Open Models (NVIDIA NIM) dynamic models fetch
+class NvidiaModelsRequest(BaseModel):
+    api_key: str | None = None
+    api_key_changed: bool = False
+    # Optional override; defaults to NVIDIA's hosted endpoint when omitted.
+    api_base: str | None = None
+    provider_name: str | None = None  # Optional: to save models to existing provider
+
+
+class NvidiaFinalModelResponse(BaseModel):
+    name: str  # Model ID (e.g. "deepseek-ai/deepseek-v4-flash")
+    display_name: str  # Human-readable name
+    max_input_tokens: int | None
+    supports_image_input: bool
+    supports_reasoning: bool

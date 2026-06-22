@@ -27,6 +27,7 @@ DYNAMIC_LLM_PROVIDERS = frozenset(
         LlmProviderNames.LM_STUDIO,
         LlmProviderNames.BIFROST,
         LlmProviderNames.OPENAI_COMPATIBLE,
+        LlmProviderNames.NVIDIA,
     }
 )
 
@@ -355,8 +356,13 @@ def extract_vendor_from_model_name(model_name: str, provider: str) -> str | None
         - Ollama: "llama3:70b" → "Meta"
         - Ollama: "qwen2.5:7b" → "Alibaba"
     """
-    if provider in (LlmProviderNames.OPENROUTER, LlmProviderNames.BIFROST):
-        # Format: "vendor/model-name" e.g., "anthropic/claude-3-5-sonnet"
+    if provider in (
+        LlmProviderNames.OPENROUTER,
+        LlmProviderNames.BIFROST,
+        LlmProviderNames.NVIDIA,
+    ):
+        # Format: "vendor/model-name" e.g., "deepseek-ai/deepseek-v4-flash",
+        # "meta/llama-3.3-70b-instruct"
         if "/" in model_name:
             vendor_key = model_name.split("/")[0].lower()
             return PROVIDER_DISPLAY_NAMES.get(vendor_key, vendor_key.title())

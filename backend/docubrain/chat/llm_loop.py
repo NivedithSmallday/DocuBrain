@@ -30,6 +30,8 @@ from docubrain.chat.prompt_utils import (
     get_default_base_system_prompt,
 )
 from docubrain.configs.app_configs import INTEGRATION_TESTS_MODE
+from docubrain.configs.chat_configs import ENABLE_ANSWER_GROUNDING_JUDGE
+from docubrain.configs.chat_configs import ENABLE_ANSWER_VERIFICATION
 from docubrain.configs.chat_configs import ENABLE_RETRIEVAL_TRACING
 from docubrain.configs.chat_configs import SHOW_CITATIONS
 from docubrain.configs.constants import DocumentSource
@@ -49,6 +51,8 @@ from docubrain.llm.interfaces import ToolChoiceOptions
 from docubrain.llm.utils import is_true_openai_model
 from docubrain.prompts.chat_prompts import IMAGE_GEN_REMINDER
 from docubrain.prompts.chat_prompts import OPEN_URL_REMINDER
+from docubrain.secondary_llm_flows.answer_verification import make_llm_complete
+from docubrain.secondary_llm_flows.answer_verification import verify_answer
 from docubrain.server.query_and_chat.placement import Placement
 from docubrain.server.query_and_chat.streaming_models import AgentResponseDelta
 from docubrain.server.query_and_chat.streaming_models import AgentResponseStart
@@ -1421,6 +1425,40 @@ def run_llm_loop(
 
             # Save citation mapping after each LLM step for incremental state updates
             state_container.set_citation_mapping(citation_processor.citation_to_doc)
+
+            # Post-generation answer-grounding verification (opt-in, observability
+            # only). Runs AFTER the answer has fully streamed, so it NEVER mutates
+            # the answer or the stream. Citation validity is LLM-free; the grounding
+            # judge (extra LLM call) is gated separately. Fully wrapped so a verifier
+            # failure can never break the chat loop. Gated by ENABLE_ANSWER_VERIFICATION.
+            if ENABLE_ANSWER_VERIFICATION and llm_step_result.answer:
+                try:
+                    # Evidence is reconstructed inside verify_answer from the
+                    # cited documents' fullest available content (full content →
+                    # match highlights → blurb), so no evidence is passed here.
+                    verification = verify_answer(
+                        answer=llm_step_result.answer,
+                        citation_mapping=citation_processor.citation_to_doc,
+                        complete=(
+                            make_llm_complete(llm)
+                            if ENABLE_ANSWER_GROUNDING_JUDGE
+                            else None
+                        ),
+                    )
+                    logger.info(
+                        "AnswerVerification: trustworthy=%s phantom_citations=%s "
+                        "grounding_ran=%s grounding_score=%.2f unsupported_claims=%d",
+                        verification.is_trustworthy,
+                        verification.citation.invalid_numbers,
+                        verification.grounding.ran,
+                        verification.grounding.grounding_score,
+                        len(verification.grounding.unsupported_claims),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Answer verification failed; continuing without it.",
+                        exc_info=True,
+                    )
 
             # Run the LLM selected tools, there is some more logic here than a simple execution
             # each tool might have custom logic here

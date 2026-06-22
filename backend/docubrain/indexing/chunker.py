@@ -28,8 +28,11 @@ from docubrain.utils.text_processing import shared_precompare_cleanup
 from shared_configs.configs import DOC_EMBEDDING_CONTEXT_SIZE
 from shared_configs.configs import STRICT_CHUNK_TOKEN_LIMIT
 
-# Not supporting overlaps, we need a clean combination of chunks and it is unclear if overlaps
-# actually help quality at all
+# Default token overlap between adjacent chunks. 0 is a *sentinel* meaning
+# "derive the overlap from CHUNK_OVERLAP_PERCENT" (see Chunker.__init__) — it does
+# NOT mean overlap is disabled. With the default CHUNK_OVERLAP_PERCENT=15 the
+# effective overlap is ~15% of the chunk token limit, which improves cross-chunk
+# context continuity. To truly disable overlap, set CHUNK_OVERLAP_PERCENT=0.
 CHUNK_OVERLAP = 0
 # Fairly arbitrary numbers but the general concept is we don't want the title/metadata to
 # overwhelm the actual contents of the chunk
@@ -258,14 +261,17 @@ class Chunker:
         Splits the text into smaller chunks based on token count to ensure
         no chunk exceeds the content_token_limit.
         """
-        tokens = self.tokenizer.tokenize(text)
+        # Encode to token ids and decode each slice back to text. Decoding (rather
+        # than `" ".join(...)` over token *strings*) losslessly reconstructs the
+        # original spacing/punctuation; space-joining subword tokens corrupts the
+        # text and degrades the resulting embeddings.
+        token_ids = self.tokenizer.encode(text)
         chunks = []
         start = 0
-        total_tokens = len(tokens)
+        total_tokens = len(token_ids)
         while start < total_tokens:
             end = min(start + content_token_limit, total_tokens)
-            token_chunk = tokens[start:end]
-            chunk_text = " ".join(token_chunk)
+            chunk_text = self.tokenizer.decode(token_ids[start:end])
             chunks.append(chunk_text)
             start = end
         return chunks

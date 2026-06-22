@@ -7,6 +7,7 @@ import {
 import { OnboardingActions, OnboardingState } from "@/interfaces/onboarding";
 import OllamaModal from "@/sections/modals/llmConfig/OllamaModal";
 import OpenAICompatibleModal from "@/sections/modals/llmConfig/OpenAICompatibleModal";
+import NvidiaModal from "@/sections/modals/llmConfig/NvidiaModal";
 
 // Display info for LLM provider cards - title is the product name, displayName is the company/platform
 const PROVIDER_DISPLAY_INFO: Record<
@@ -17,6 +18,10 @@ const PROVIDER_DISPLAY_INFO: Record<
   [LLMProviderName.OPENAI_COMPATIBLE]: {
     title: "vLLM",
     displayName: "OpenAI-Compatible API",
+  },
+  [LLMProviderName.NVIDIA]: {
+    title: "NVIDIA",
+    displayName: "NVIDIA Hosted Open Models",
   },
 };
 
@@ -75,6 +80,8 @@ export function getOnboardingForm({
       return <OllamaModal {...sharedProps} />;
     case LLMProviderName.OPENAI_COMPATIBLE:
       return <OpenAICompatibleModal {...sharedProps} />;
+    case LLMProviderName.NVIDIA:
+      return <NvidiaModal {...sharedProps} />;
     default:
       return <OllamaModal {...sharedProps} />;
   }
